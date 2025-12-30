@@ -16,6 +16,9 @@ TOOLS_DIR=$CZECH_DIR/tools
 TRAINING_OUTPUT=/mnt/8TB/TRAINING_OUTPUTS/Fun-CosyVoice3-0.5B-2512_CZECH_30s_200hours_lr1e-5_$(date +%Y-%m-%d)
 CONDA_ENV=fish-speech
 NUM_THREADS=8
+# Set to "gpu" for faster Stage 2 (~10 min instead of ~115 min)
+# GPU version uses CUDAExecutionProvider instead of CPU threading
+STAGE2_MODE="cpu"  # Options: "cpu" (current), "gpu" (5-20x faster)
 
 echo "=========================================="
 echo "Czech CosyVoice Fine-tuning Pipeline"
@@ -26,6 +29,8 @@ echo "MODEL_DIR: $MODEL_DIR"
 echo "TRAINING_OUTPUT: $TRAINING_OUTPUT"
 echo "Auto-resume: ENABLED (use --no_resume to disable)"
 echo ""
+echo "[STAGE: INIT] Pipeline initialization complete"
+echo ""
 
 # Activate micromamba environment
 eval "$(micromamba shell hook --shell bash)"
@@ -34,15 +39,26 @@ micromamba activate $CONDA_ENV
 # ========== Stage 2: Extract speaker embeddings ==========
 echo ""
 echo "========== Stage 2: Extract speaker embeddings =========="
+if [ "$STAGE2_MODE" = "gpu" ]; then
+    echo "[STAGE: 2/6] Extracting speaker embeddings (GPU, ~10-15 min)"
+else
+    echo "[STAGE: 2/6] Extracting speaker embeddings (CPU, ~115 min)"
+fi
 echo "Started: $(date)"
 
 for split in train eval; do
     echo ""
     echo "--- Processing $split split ---"
-    python $TOOLS_DIR/extract_embedding_progress.py \
-        --dir $OUTPUT_BASE/$split \
-        --onnx_path $MODEL_DIR/campplus.onnx \
-        --num_thread $NUM_THREADS
+    if [ "$STAGE2_MODE" = "gpu" ]; then
+        python $TOOLS_DIR/extract_embedding_gpu.py \
+            --dir $OUTPUT_BASE/$split \
+            --onnx_path $MODEL_DIR/campplus.onnx
+    else
+        python $TOOLS_DIR/extract_embedding_progress.py \
+            --dir $OUTPUT_BASE/$split \
+            --onnx_path $MODEL_DIR/campplus.onnx \
+            --num_thread $NUM_THREADS
+    fi
 done
 
 echo ""
@@ -51,6 +67,7 @@ echo "Stage 2 complete: $(date)"
 # ========== Stage 3: Extract speech tokens ==========
 echo ""
 echo "========== Stage 3: Extract speech tokens =========="
+echo "[STAGE: 3/6] Extracting speech tokens (GPU, ~15 min)"
 echo "Started: $(date)"
 
 for split in train eval; do
@@ -68,6 +85,7 @@ echo "Stage 3 complete: $(date)"
 # ========== Stage 4: Make parquet files ==========
 echo ""
 echo "========== Stage 4: Make parquet files =========="
+echo "[STAGE: 4/6] Creating parquet files (~5 min)"
 echo "Started: $(date)"
 
 cd $COSYVOICE_DIR/examples/libritts/cosyvoice3
@@ -95,6 +113,7 @@ echo "Stage 4 complete: $(date)"
 # ========== Stage 5: LLM Training ==========
 echo ""
 echo "========== Stage 5: LLM Training =========="
+echo "[STAGE: 5/6] LLM fine-tuning (~12-36 hours)"
 echo "Started: $(date)"
 
 # Create training output directory
@@ -125,6 +144,7 @@ echo "Stage 5 (LLM training) complete: $(date)"
 # ========== Stage 6: Flow Training ==========
 echo ""
 echo "========== Stage 6: Flow Training =========="
+echo "[STAGE: 6/6] Flow fine-tuning (~12-36 hours)"
 echo "Started: $(date)"
 
 # Get latest LLM checkpoint
@@ -155,7 +175,7 @@ echo "Stage 6 (Flow training) complete: $(date)"
 
 echo ""
 echo "=========================================="
-echo "Pipeline Complete!"
+echo "[STAGE: DONE] Pipeline Complete!"
 echo "Finished: $(date)"
 echo "Training outputs: $TRAINING_OUTPUT"
 echo "=========================================="
