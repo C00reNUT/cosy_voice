@@ -1,0 +1,1 @@
+../../libritts/cosyvoice3/tools/make_parquet_list.py

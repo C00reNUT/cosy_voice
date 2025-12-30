@@ -1,0 +1,1 @@
+../../libritts/cosyvoice3/tools/extract_embedding.py
