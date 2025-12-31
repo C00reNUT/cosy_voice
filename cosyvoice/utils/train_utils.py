@@ -344,9 +344,9 @@ def log_per_step(writer, info_dict):
         display_tag = "EVAL" if tag == "CV" else tag
         total_steps = info_dict.get('total_steps', 0)
         if total_steps > 0:
-            log_str = '{} Step {}/{} '.format(display_tag, step + 1, total_steps)
+            log_str = '{} Epoch {} Step {}/{} '.format(display_tag, epoch, step + 1, total_steps)
         else:
-            log_str = '{} Step {} '.format(display_tag, step + 1)
+            log_str = '{} Epoch {} Step {} '.format(display_tag, epoch, step + 1)
         for name, value in loss_dict.items():
             log_str += '{} {:.6f} '.format(name, value)
         if tag == "TRAIN":
