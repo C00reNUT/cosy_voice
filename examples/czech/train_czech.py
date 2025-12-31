@@ -156,15 +156,23 @@ def get_random_speaker_ref(speakers: list, rng: random.Random) -> tuple:
 
 
 def manage_rolling_checkpoints(checkpoint_dir: str, max_keep: int = 3):
-    """Manage rolling checkpoints, keeping only the most recent.
+    """Manage rolling checkpoints, keeping only the most recent step checkpoints.
 
     Args:
         checkpoint_dir: Directory containing checkpoints
-        max_keep: Maximum checkpoints to keep
+        max_keep: Maximum step checkpoints to keep (excludes best_model, epoch_*_whole)
     """
-    # Find step checkpoints (not eval or best)
-    pattern = os.path.join(checkpoint_dir, 'step_*.pt')
-    checkpoints = sorted(glob.glob(pattern), key=lambda x: int(Path(x).stem.split('_')[-1]))
+    # Find step checkpoints matching pattern: epoch_N_step_M.pt
+    pattern = os.path.join(checkpoint_dir, 'epoch_*_step_*.pt')
+    checkpoints = glob.glob(pattern)
+
+    # Sort by step number (extract step from filename)
+    def get_step(path):
+        name = Path(path).stem  # epoch_0_step_500
+        parts = name.split('_')
+        return int(parts[-1]) if parts[-1].isdigit() else 0
+
+    checkpoints = sorted(checkpoints, key=get_step)
 
     # Remove old checkpoints
     while len(checkpoints) > max_keep:
@@ -332,11 +340,11 @@ class CzechExecutor(Executor):
 
     @torch.inference_mode()
     def cv(self, model, cv_data_loader, writer, info_dict, on_batch_end=True):
-        """Override cv() to add TTS generation and best model saving.
+        """Override cv() to add TTS generation, best model saving, and checkpoint cleanup.
 
         This is called by train_one_epoc at evaluation checkpoints.
         """
-        # Call parent cv() method for loss computation
+        # Call parent cv() method for loss computation and checkpoint saving
         super().cv(model, cv_data_loader, writer, info_dict, on_batch_end)
 
         # Get eval loss from info_dict
@@ -347,6 +355,11 @@ class CzechExecutor(Executor):
         # Save best model if loss improved
         if self.rank == 0:
             self.save_best_model(model, cv_loss)
+
+            # Clean up old step checkpoints (keep only max_checkpoints)
+            max_keep = getattr(self.args, 'max_checkpoints', 3)
+            checkpoint_dir = os.path.join(self.args.model_dir, 'llm')
+            manage_rolling_checkpoints(checkpoint_dir, max_keep)
 
         # Run TTS generation if at correct interval
         # Note: self.step is 0-indexed, so step 499 corresponds to checkpoint 500

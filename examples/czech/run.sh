@@ -7,9 +7,9 @@ set -e
 
 # Paths
 MODEL_DIR=/mnt/4TB_Dataset_WD/MODELS/AUDIO/TEXT_TO_SPEECH/Fun-CosyVoice3-0.5B-2512
-DATASET_CSV=/mnt/4TB_Dataset_WD/AUDIO_DATASETS/CZECH/CZECH_30s_200hours_hranicar_oko_merged/dataset_merged.csv
-OUTPUT_BASE=/mnt/4TB_Dataset_WD/AUDIO_DATASETS/CZECH/CZECH_30s_200hours_hranicar_oko_merged_Fun-CosyVoice3-0.5B-2512
-TRAINING_OUTPUT=/mnt/8TB/TRAINING_OUTPUTS/Fun-CosyVoice3-0.5B-2512_CZECH_30s_200hours_lr1e-5_$(date +%Y-%m-%d)
+DATASET_CSV=/mnt/4TB_Dataset_WD/AUDIO_DATASETS/CZECH/CZECH_kolocasu_all_Fun-CosyVoice3-0.5B-2512/dataset_merged.csv
+OUTPUT_BASE=/mnt/4TB_Dataset_WD/AUDIO_DATASETS/CZECH/CZECH_kolocasu_all_Fun-CosyVoice3-0.5B-2512
+TRAINING_OUTPUT=/mnt/8TB/TRAINING_RUNS/cosyvoice_czech_$(date +%Y-%m-%d)
 
 # Training params
 CUDA_VISIBLE_DEVICES="0"
@@ -103,7 +103,10 @@ if [ $stage -le 5 ] && [ $stop_stage -ge 5 ]; then
 
     export CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES
 
-    torchrun --nnodes=1 --nproc_per_node=$NUM_GPUS \
+    LLM_LOG=$TRAINING_OUTPUT/llm_training.log
+    echo "Training LLM with nohup. Log: $LLM_LOG"
+
+    nohup torchrun --nnodes=1 --nproc_per_node=$NUM_GPUS \
         --rdzv_id=2024 --rdzv_backend="c10d" --rdzv_endpoint="localhost:29500" \
         train_czech.py \
         --model llm \
@@ -118,8 +121,14 @@ if [ $stage -le 5 ] && [ $stop_stage -ge 5 ]; then
         --eval_per_step 5000 \
         --max_checkpoints 3 \
         --use_amp \
-        --pin_memory
-    echo "Stage 5 complete. LLM checkpoints: $TRAINING_OUTPUT/llm"
+        --pin_memory \
+        > $LLM_LOG 2>&1 &
+
+    LLM_PID=$!
+    echo "LLM training started with PID: $LLM_PID"
+    echo $LLM_PID > $TRAINING_OUTPUT/llm_training.pid
+    echo "Monitor with: tail -f $LLM_LOG"
+    echo "Stage 5 started in background."
 fi
 
 # Stage 6: Train Flow
@@ -130,7 +139,10 @@ if [ $stage -le 6 ] && [ $stop_stage -ge 6 ]; then
 
     export CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES
 
-    torchrun --nnodes=1 --nproc_per_node=$NUM_GPUS \
+    FLOW_LOG=$TRAINING_OUTPUT/flow_training.log
+    echo "Training Flow with nohup. Log: $FLOW_LOG"
+
+    nohup torchrun --nnodes=1 --nproc_per_node=$NUM_GPUS \
         --rdzv_id=2025 --rdzv_backend="c10d" --rdzv_endpoint="localhost:29501" \
         train_czech.py \
         --model flow \
@@ -145,8 +157,14 @@ if [ $stage -le 6 ] && [ $stop_stage -ge 6 ]; then
         --eval_per_step 5000 \
         --max_checkpoints 3 \
         --use_amp \
-        --pin_memory
-    echo "Stage 6 complete. Flow checkpoints: $TRAINING_OUTPUT/flow"
+        --pin_memory \
+        > $FLOW_LOG 2>&1 &
+
+    FLOW_PID=$!
+    echo "Flow training started with PID: $FLOW_PID"
+    echo $FLOW_PID > $TRAINING_OUTPUT/flow_training.pid
+    echo "Monitor with: tail -f $FLOW_LOG"
+    echo "Stage 6 started in background."
 fi
 
 echo ""
