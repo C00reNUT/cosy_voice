@@ -6,9 +6,15 @@
 set -e
 
 # Activate cosyvoice environment
-export MAMBA_ROOT_PREFIX=/mnt/8TB/MAMBA_CACHE_DIR
+if [ -z "${MAMBA_ROOT_PREFIX:-}" ]; then
+    export MAMBA_ROOT_PREFIX=/mnt/BigStorage/MAMBA_CACHE_DIR
+fi
 eval "$(/home/freddy/.local/bin/micromamba shell hook --shell bash)"
 micromamba activate cosyvoice
+
+# Ensure Matcha-TTS is importable without pip install.
+COSYVOICE_DIR=$(cd "$(dirname "$0")/../.."; pwd)
+export PYTHONPATH="$COSYVOICE_DIR:$COSYVOICE_DIR/third_party/Matcha-TTS:$PYTHONPATH"
 
 # Paths
 MODEL_DIR=/mnt/4TB_Dataset_WD/MODELS/AUDIO/TEXT_TO_SPEECH/Fun-CosyVoice3-0.5B-2512
@@ -94,13 +100,13 @@ if [ $stage -le 4 ] && [ $stop_stage -ge 4 ]; then
     echo "========== Stage 4: Make parquet files =========="
     for split in train eval; do
         echo "Processing $split split..."
-        mkdir -p $OUTPUT_BASE/$split/parquet
+        mkdir -p $OUTPUT_BASE/$split
         python tools/make_parquet_list.py \
             --num_utts_per_parquet 1000 \
             --num_processes 8 \
             --instruct \
             --src_dir $OUTPUT_BASE/$split \
-            --des_dir $OUTPUT_BASE/$split/parquet
+            --des_dir $OUTPUT_BASE/$split
     done
     echo "Stage 4 complete."
 fi
@@ -121,8 +127,8 @@ if [ $stage -le 5 ] && [ $stop_stage -ge 5 ]; then
         train_czech.py \
         --model llm \
         --config conf/cosyvoice3_czech.yaml \
-        --train_data $OUTPUT_BASE/train/parquet/data.list \
-        --cv_data $OUTPUT_BASE/eval/parquet/data.list \
+        --train_data $OUTPUT_BASE/train/data.list \
+        --cv_data $OUTPUT_BASE/eval/data.list \
         --qwen_pretrain_path $MODEL_DIR/CosyVoice-BlankEN \
         --checkpoint $MODEL_DIR/llm.pt \
         --model_dir $TRAINING_OUTPUT/llm \
@@ -157,8 +163,8 @@ if [ $stage -le 6 ] && [ $stop_stage -ge 6 ]; then
         train_czech.py \
         --model flow \
         --config conf/cosyvoice3_czech.yaml \
-        --train_data $OUTPUT_BASE/train/parquet/data.list \
-        --cv_data $OUTPUT_BASE/eval/parquet/data.list \
+        --train_data $OUTPUT_BASE/train/data.list \
+        --cv_data $OUTPUT_BASE/eval/data.list \
         --qwen_pretrain_path $MODEL_DIR/CosyVoice-BlankEN \
         --checkpoint $MODEL_DIR/flow.pt \
         --model_dir $TRAINING_OUTPUT/flow \

@@ -9,7 +9,7 @@ Features:
 - Full resume capability
 
 Micromamba env: cosyvoice
-Environment location: /mnt/8TB/MAMBA_CACHE_DIR/envs/cosyvoice
+Environment location: $MAMBA_ROOT_PREFIX/envs/cosyvoice
 
 Usage:
     torchrun --nproc_per_node=1 train_czech.py \\
@@ -40,6 +40,9 @@ from torch.distributed.elastic.multiprocessing.errors import record
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+matcha_root = PROJECT_ROOT / "third_party" / "Matcha-TTS"
+if matcha_root.exists():
+    sys.path.insert(0, str(matcha_root))
 
 from cosyvoice.utils.executor import Executor
 from cosyvoice.utils.train_utils import (
@@ -359,7 +362,7 @@ class CzechExecutor(Executor):
 
             # Clean up old step checkpoints (keep only max_checkpoints)
             max_keep = getattr(self.args, 'max_checkpoints', 3)
-            checkpoint_dir = os.path.join(self.args.model_dir, 'llm')
+            checkpoint_dir = self.args.model_dir
             manage_rolling_checkpoints(checkpoint_dir, max_keep)
 
         # Run TTS generation if at correct interval
