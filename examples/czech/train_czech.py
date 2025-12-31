@@ -92,6 +92,30 @@ def get_args():
     return parser.parse_args()
 
 
+def estimate_total_steps(data_list_path: str, accum_grad: int, max_epoch: int) -> int:
+    """Estimate total training steps based on dataset size.
+
+    Args:
+        data_list_path: Path to data.list file
+        accum_grad: Gradient accumulation steps
+        max_epoch: Maximum epochs
+
+    Returns:
+        Estimated total steps
+    """
+    try:
+        with open(data_list_path, 'r') as f:
+            tar_count = sum(1 for _ in f)
+        # Each tar has ~1000 samples, dynamic batching yields ~142 batches per 1000 samples
+        samples_per_tar = 1000
+        batches_per_1000_samples = 142  # empirical from previous runs
+        batches_per_epoch = tar_count * batches_per_1000_samples
+        steps_per_epoch = batches_per_epoch // accum_grad
+        return steps_per_epoch * max_epoch
+    except Exception:
+        return 0  # Return 0 if estimation fails
+
+
 def load_dataset_speakers(csv_path: str, delimiter: str = '|') -> list:
     """Load speaker audio references from dataset CSV.
 
@@ -419,6 +443,9 @@ def main():
     info_dict = deepcopy(configs['train_conf'])
     info_dict['step'] = start_step
     info_dict['epoch'] = start_epoch
+    info_dict['total_steps'] = estimate_total_steps(
+        args.train_data, configs['train_conf']['accum_grad'], configs['train_conf']['max_epoch']
+    )
     save_model(model, 'init', info_dict)
 
     # Create executor
@@ -428,10 +455,12 @@ def main():
     executor.model_type = args.model
 
     # Load CosyVoice3 model for TTS evaluation (only on rank 0)
+    # CosyVoice3 expects the model dir with cosyvoice3.yaml, which is parent of qwen_pretrain_path
     if rank == 0 and args.tts_eval_per_step > 0:
-        logger.info("Loading CosyVoice3 model for TTS evaluation...")
+        cosyvoice_model_dir = str(Path(args.qwen_pretrain_path).parent)
+        logger.info(f"Loading CosyVoice3 model from {cosyvoice_model_dir} for TTS evaluation...")
         try:
-            cosyvoice_model = CosyVoice3(args.qwen_pretrain_path)
+            cosyvoice_model = CosyVoice3(cosyvoice_model_dir)
             executor.cosyvoice_model = cosyvoice_model
             logger.info("CosyVoice3 model loaded successfully for TTS evaluation")
         except Exception as e:
@@ -439,6 +468,7 @@ def main():
             logger.warning("TTS evaluation will be disabled")
 
     logger.info(f'Starting training from step {start_step}, epoch {start_epoch + 1}')
+    logger.info(f'Estimated total steps: {info_dict["total_steps"]}')
     logger.info(f'Save every {args.save_per_step} steps, eval every {args.eval_per_step} steps')
     logger.info(f'TTS eval every {args.tts_eval_per_step} steps')
     logger.info(f'Max rolling checkpoints: {args.max_checkpoints}')

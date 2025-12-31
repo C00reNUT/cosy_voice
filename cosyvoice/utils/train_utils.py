@@ -342,7 +342,11 @@ def log_per_step(writer, info_dict):
     if (info_dict['batch_idx'] + 1) % info_dict['log_interval'] == 0:
         # Use "EVAL" instead of "CV" for clarity
         display_tag = "EVAL" if tag == "CV" else tag
-        log_str = '{} Epoch {} Batch {} Step {} '.format(display_tag, epoch, batch_idx + 1, step + 1)
+        total_steps = info_dict.get('total_steps', 0)
+        if total_steps > 0:
+            log_str = '{} Step {}/{} '.format(display_tag, step + 1, total_steps)
+        else:
+            log_str = '{} Step {} '.format(display_tag, step + 1)
         for name, value in loss_dict.items():
             log_str += '{} {:.6f} '.format(name, value)
         if tag == "TRAIN":
@@ -357,9 +361,14 @@ def log_per_save(writer, info_dict):
     step = info_dict["step"]
     loss_dict = info_dict["loss_dict"]
     lr = info_dict.get('lr', 0.0)
+    total_steps = info_dict.get('total_steps', 0)
+    if total_steps > 0:
+        step_str = 'Step {}/{}'.format(step + 1, total_steps)
+    else:
+        step_str = 'Step {}'.format(step + 1)
     logging.info(
-        'Epoch {} Step {} EVAL info lr {} {}'.format(
-            epoch, step + 1, lr, ' '.join(['{} {}'.format(k, v) for k, v in loss_dict.items()])))
+        'Epoch {} {} EVAL info lr {} {}'.format(
+            epoch, step_str, lr, ' '.join(['{} {}'.format(k, v) for k, v in loss_dict.items()])))
 
     if writer is not None:
         for k in ['epoch', 'lr']:
