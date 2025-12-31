@@ -1,15 +1,20 @@
 #!/bin/bash
 # Czech Fine-tuning for Fun-CosyVoice3-0.5B-2512
 # Usage: ./run.sh [stage] [stop_stage]
-# Micromamba env: cosyvoice
+# Micromamba env: cosyvoice (created from requirements.txt)
 
 set -e
+
+# Activate cosyvoice environment
+export MAMBA_ROOT_PREFIX=/mnt/8TB/MAMBA_CACHE_DIR
+eval "$(/home/freddy/.local/bin/micromamba shell hook --shell bash)"
+micromamba activate cosyvoice
 
 # Paths
 MODEL_DIR=/mnt/4TB_Dataset_WD/MODELS/AUDIO/TEXT_TO_SPEECH/Fun-CosyVoice3-0.5B-2512
 DATASET_CSV=/mnt/4TB_Dataset_WD/AUDIO_DATASETS/CZECH/CZECH_kolocasu_all_Fun-CosyVoice3-0.5B-2512/dataset_merged.csv
 OUTPUT_BASE=/mnt/4TB_Dataset_WD/AUDIO_DATASETS/CZECH/CZECH_kolocasu_all_Fun-CosyVoice3-0.5B-2512
-TRAINING_OUTPUT=/mnt/8TB/TRAINING_RUNS/cosyvoice_czech_$(date +%Y-%m-%d)
+TRAINING_OUTPUT=/mnt/8TB/TRAINING_RUNS/cosyvoice/czech_$(date +%Y-%m-%d)
 
 # Training params
 CUDA_VISIBLE_DEVICES="0"

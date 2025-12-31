@@ -9,13 +9,14 @@ Features:
 - Full resume capability
 
 Micromamba env: cosyvoice
+Environment location: /mnt/8TB/MAMBA_CACHE_DIR/envs/cosyvoice
 
 Usage:
     torchrun --nproc_per_node=1 train_czech.py \\
         --config conf/cosyvoice3_czech.yaml \\
         --train_data data/train/parquet/data.list \\
         --cv_data data/eval/parquet/data.list \\
-        --model_dir /mnt/8TB/TRAINING_OUTPUTS/...
+        --model_dir /mnt/8TB/TRAINING_RUNS/cosyvoice/...
 """
 from __future__ import print_function
 import argparse
