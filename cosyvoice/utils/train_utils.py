@@ -40,8 +40,7 @@ def init_distributed(args):
     world_size = int(os.environ.get('WORLD_SIZE', 1))
     local_rank = int(os.environ.get('LOCAL_RANK', 0))
     rank = int(os.environ.get('RANK', 0))
-    logging.info('training on multiple gpus, this gpu {}'.format(local_rank) +
-                 ', rank {}, world_size {}'.format(rank, world_size))
+    logging.info('training on multiple gpus, this gpu {}, world_size {}'.format(local_rank, world_size))
     if args.train_engine == 'torch_ddp':
         torch.cuda.set_device(local_rank)
         dist.init_process_group(args.dist_backend)
@@ -211,7 +210,7 @@ def save_model(model, model_name, info_dict):
         with open(info_path, 'w') as fout:
             data = yaml.dump(info_dict)
             fout.write(data)
-        logging.info('[Rank {}] Checkpoint: save to checkpoint {}'.format(rank, save_model_path))
+        logging.info('Checkpoint: save to checkpoint {}'.format(save_model_path))
 
 
 def cosyvoice_join(group_join, info_dict):
@@ -347,7 +346,6 @@ def log_per_step(writer, info_dict):
         if tag == "TRAIN":
             log_str += 'lr {:.8f} grad_norm {:.6f}'.format(
                 info_dict["lr"], info_dict['grad_norm'])
-        log_str += ' rank {}'.format(rank)
         logging.debug(log_str)
 
 
@@ -357,10 +355,9 @@ def log_per_save(writer, info_dict):
     step = info_dict["step"]
     loss_dict = info_dict["loss_dict"]
     lr = info_dict['lr']
-    rank = int(os.environ.get('RANK', 0))
     logging.info(
-        'Epoch {} Step {} CV info lr {} {} rank {}'.format(
-            epoch, step + 1, lr, rank, ' '.join(['{} {}'.format(k, v) for k, v in loss_dict.items()])))
+        'Epoch {} Step {} CV info lr {} {}'.format(
+            epoch, step + 1, lr, ' '.join(['{} {}'.format(k, v) for k, v in loss_dict.items()])))
 
     if writer is not None:
         for k in ['epoch', 'lr']:

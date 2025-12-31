@@ -39,7 +39,7 @@ class Executor:
         '''
 
         lr = optimizer.param_groups[0]['lr']
-        logging.info('Epoch {} TRAIN info lr {} rank {}'.format(self.epoch, lr, self.rank))
+        logging.info('Epoch {} TRAIN info lr {}'.format(self.epoch, lr))
         logging.info('using accumulate grad, new batch size is {} times'
                      ' larger than before'.format(info_dict['accum_grad']))
         # A context manager to be used in conjunction with an instance of
@@ -91,7 +91,7 @@ class Executor:
         '''
 
         lr = optimizer.param_groups[0]['lr']
-        logging.info('Epoch {} TRAIN info lr {} rank {}'.format(self.epoch, lr, self.rank))
+        logging.info('Epoch {} TRAIN info lr {}'.format(self.epoch, lr))
         logging.info('using accumulate grad, new batch size is {} times'
                      ' larger than before'.format(info_dict['accum_grad']))
         # A context manager to be used in conjunction with an instance of
@@ -147,7 +147,7 @@ class Executor:
     def cv(self, model, cv_data_loader, writer, info_dict, on_batch_end=True):
         ''' Cross validation on
         '''
-        logging.info('Epoch {} Step {} on_batch_end {} CV rank {}'.format(self.epoch, self.step + 1, on_batch_end, self.rank))
+        logging.info('Epoch {} Step {} on_batch_end {} CV'.format(self.epoch, self.step + 1, on_batch_end))
         model.eval()
         total_num_utts, total_loss_dict = 0, {}  # avoid division by 0
         for batch_idx, batch_dict in enumerate(cv_data_loader):
