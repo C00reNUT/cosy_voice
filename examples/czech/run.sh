@@ -14,7 +14,12 @@ micromamba activate cosyvoice
 MODEL_DIR=/mnt/4TB_Dataset_WD/MODELS/AUDIO/TEXT_TO_SPEECH/Fun-CosyVoice3-0.5B-2512
 DATASET_CSV=/mnt/4TB_Dataset_WD/AUDIO_DATASETS/CZECH/CZECH_kolocasu_all_Fun-CosyVoice3-0.5B-2512/dataset_merged.csv
 OUTPUT_BASE=/mnt/4TB_Dataset_WD/AUDIO_DATASETS/CZECH/CZECH_kolocasu_all_Fun-CosyVoice3-0.5B-2512
-TRAINING_OUTPUT=/mnt/8TB/TRAINING_RUNS/cosyvoice/czech_$(date +%Y-%m-%d)
+
+# Training run naming: {model}_{dataset_short}_{lr}_{date}
+MODEL_NAME=cosyvoice
+DATASET_SHORT=kolocasu
+LR=1e-5
+TRAINING_OUTPUT=/mnt/8TB/TRAINING_RUNS/${MODEL_NAME}/${MODEL_NAME}_${DATASET_SHORT}_${LR}_$(date +%Y-%m-%d)
 
 # Training params
 CUDA_VISIBLE_DEVICES="0"
