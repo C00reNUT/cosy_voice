@@ -153,9 +153,10 @@ class CosyVoiceFrontEnd:
             elif contains_czech(text):
                 # Czech text processing - preserve text as-is
                 # Skip English normalization and number spelling (inflect is English-only)
+                # Enable comma_split to match training data distribution (mean=30 tokens, max=65)
                 text = text.replace("\n", " ")
                 texts = list(split_paragraph(text, partial(self.tokenizer.encode, allowed_special=self.allowed_special), "cs", token_max_n=80,
-                                             token_min_n=60, merge_len=20, comma_split=False))
+                                             token_min_n=60, merge_len=20, comma_split=True))
             else:
                 if self.text_frontend == 'wetext':
                     text = self.en_tn_model.normalize(text)
