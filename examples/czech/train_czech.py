@@ -349,8 +349,9 @@ class CzechExecutor(Executor):
             self.save_best_model(model, cv_loss)
 
         # Run TTS generation if at correct interval
+        # Note: self.step is 0-indexed, so step 499 corresponds to checkpoint 500
         tts_interval = getattr(self.args, 'tts_eval_per_step', 500)
-        if tts_interval > 0 and self.step > 0 and self.step % tts_interval == 0:
+        if tts_interval > 0 and self.step > 0 and (self.step + 1) % tts_interval == 0:
             if self.rank == 0:
                 self.run_evaluation_tts(model, self.step)
 
