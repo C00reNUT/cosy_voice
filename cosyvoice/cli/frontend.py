@@ -24,7 +24,7 @@ import os
 import re
 import inflect
 from cosyvoice.utils.file_utils import logging, load_wav
-from cosyvoice.utils.frontend_utils import contains_chinese, replace_blank, replace_corner_mark, remove_bracket, spell_out_number, split_paragraph, is_only_punctuation
+from cosyvoice.utils.frontend_utils import contains_chinese, contains_czech, replace_blank, replace_corner_mark, remove_bracket, spell_out_number, split_paragraph, is_only_punctuation
 
 
 class CosyVoiceFrontEnd:
@@ -149,6 +149,12 @@ class CosyVoiceFrontEnd:
                 text = remove_bracket(text)
                 text = re.sub(r'[，,、]+$', '。', text)
                 texts = list(split_paragraph(text, partial(self.tokenizer.encode, allowed_special=self.allowed_special), "zh", token_max_n=80,
+                                             token_min_n=60, merge_len=20, comma_split=False))
+            elif contains_czech(text):
+                # Czech text processing - preserve text as-is
+                # Skip English normalization and number spelling (inflect is English-only)
+                text = text.replace("\n", " ")
+                texts = list(split_paragraph(text, partial(self.tokenizer.encode, allowed_special=self.allowed_special), "cs", token_max_n=80,
                                              token_min_n=60, merge_len=20, comma_split=False))
             else:
                 if self.text_frontend == 'wetext':

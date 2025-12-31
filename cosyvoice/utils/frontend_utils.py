@@ -15,11 +15,24 @@
 import re
 import regex
 chinese_char_pattern = re.compile(r'[\u4e00-\u9fff]+')
+czech_char_pattern = re.compile(r'[ěščřžýáíéůúďťňĚŠČŘŽÝÁÍÉŮÚĎŤŇ]')
 
 
 # whether contain chinese character
 def contains_chinese(text):
     return bool(chinese_char_pattern.search(text))
+
+
+def contains_czech(text):
+    """Detect if text contains Czech diacritical characters.
+
+    Args:
+        text: Input text string.
+
+    Returns:
+        True if text contains Czech-specific diacritical characters.
+    """
+    return bool(czech_char_pattern.search(text))
 
 
 # replace special symbol
@@ -77,6 +90,9 @@ def split_paragraph(text: str, tokenize, lang="zh", token_max_n=80, token_min_n=
 
     if lang == "zh":
         pounc = ['。', '？', '！', '；', '：', '、', '.', '?', '!', ';']
+    elif lang == "cs":
+        # Czech punctuation (similar to English but with em-dash support)
+        pounc = ['.', '?', '!', ';', ':', '–', '—']
     else:
         pounc = ['.', '?', '!', ';', ':']
     if comma_split:
@@ -86,7 +102,7 @@ def split_paragraph(text: str, tokenize, lang="zh", token_max_n=80, token_min_n=
         if lang == "zh":
             text += "。"
         else:
-            text += "."
+            text += "."  # Works for both English and Czech
 
     st = 0
     utts = []
