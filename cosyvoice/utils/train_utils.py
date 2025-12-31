@@ -356,13 +356,13 @@ def log_per_save(writer, info_dict):
     epoch = info_dict["epoch"]
     step = info_dict["step"]
     loss_dict = info_dict["loss_dict"]
-    lr = info_dict['lr']
+    lr = info_dict.get('lr', 0.0)
     logging.info(
         'Epoch {} Step {} EVAL info lr {} {}'.format(
             epoch, step + 1, lr, ' '.join(['{} {}'.format(k, v) for k, v in loss_dict.items()])))
 
     if writer is not None:
         for k in ['epoch', 'lr']:
-            writer.add_scalar('{}/{}'.format(tag, k), info_dict[k], step + 1)
+            writer.add_scalar('{}/{}'.format(tag, k), info_dict.get(k, 0), step + 1)
         for k, v in loss_dict.items():
             writer.add_scalar('{}/{}'.format(tag, k), v, step + 1)
