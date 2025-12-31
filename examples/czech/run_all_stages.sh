@@ -36,6 +36,17 @@ echo ""
 eval "$(micromamba shell hook --shell bash)"
 micromamba activate $CONDA_ENV
 
+# Add CosyVoice and Matcha-TTS to PYTHONPATH
+export PYTHONPATH="$COSYVOICE_DIR:$COSYVOICE_DIR/third_party/Matcha-TTS:$PYTHONPATH"
+echo "PYTHONPATH: $PYTHONPATH"
+
+# Add NVIDIA library paths to LD_LIBRARY_PATH
+NVIDIA_LIB_BASE="/mnt/BigStorage/MAMBA_CACHE_DIR/envs/fish-speech/lib/python3.11/site-packages/nvidia"
+for lib_dir in $(find $NVIDIA_LIB_BASE -name "lib" -type d 2>/dev/null); do
+    export LD_LIBRARY_PATH="$lib_dir:$LD_LIBRARY_PATH"
+done
+echo "LD_LIBRARY_PATH set with NVIDIA libraries"
+
 # ========== Stage 2: Extract speaker embeddings ==========
 echo ""
 echo "========== Stage 2: Extract speaker embeddings =========="
@@ -123,20 +134,24 @@ mkdir -p $TRAINING_OUTPUT/eval_samples
 
 cd $CZECH_DIR
 
-# Run LLM training
-echo "Starting LLM training..."
-python train_czech.py \
-    --train_data $OUTPUT_BASE/train_parquet/data.list \
-    --cv_data $OUTPUT_BASE/eval_parquet/data.list \
-    --model_dir $MODEL_DIR \
-    --config conf/cosyvoice3_czech.yaml \
-    --checkpoint $MODEL_DIR/llm.pt \
-    --train_type llm \
-    --output_dir $TRAINING_OUTPUT/llm \
-    --eval_output_dir $TRAINING_OUTPUT/eval_samples \
-    --eval_data_dir $OUTPUT_BASE/eval \
-    --num_workers 4 \
-    --prefetch 100
+# Check if LLM training already completed (max_epoch=2 means epoch_1_whole.pt is final)
+if [ -f "$TRAINING_OUTPUT/llm/epoch_1_whole.pt" ]; then
+    echo "LLM training already completed (epoch_1_whole.pt exists), skipping..."
+else
+    # Run LLM training with torchrun for distributed training
+    echo "Starting LLM training..."
+    torchrun --nproc_per_node=1 --master_port=29501 train_czech.py \
+        --train_data $OUTPUT_BASE/train_parquet/data.list \
+        --cv_data $OUTPUT_BASE/eval_parquet/data.list \
+        --model_dir $TRAINING_OUTPUT/llm \
+        --config conf/cosyvoice3_czech.yaml \
+        --checkpoint $MODEL_DIR/llm.pt \
+        --model llm \
+        --qwen_pretrain_path $MODEL_DIR/CosyVoice-BlankEN \
+        --dataset_csv /mnt/4TB_Dataset_WD/AUDIO_DATASETS/CZECH/CZECH_30s_200hours_hranicar_oko_merged/dataset_merged.csv \
+        --num_workers 4 \
+        --prefetch 100
+fi
 
 echo ""
 echo "Stage 5 (LLM training) complete: $(date)"
@@ -155,18 +170,17 @@ if [ -z "$LATEST_LLM_CKPT" ]; then
 fi
 echo "Using LLM checkpoint: $LATEST_LLM_CKPT"
 
-# Run Flow training
+# Run Flow training with torchrun for distributed training
 echo "Starting Flow training..."
-python train_czech.py \
+torchrun --nproc_per_node=1 --master_port=29502 train_czech.py \
     --train_data $OUTPUT_BASE/train_parquet/data.list \
     --cv_data $OUTPUT_BASE/eval_parquet/data.list \
-    --model_dir $MODEL_DIR \
+    --model_dir $TRAINING_OUTPUT/flow \
     --config conf/cosyvoice3_czech.yaml \
     --checkpoint $MODEL_DIR/flow.pt \
-    --train_type flow \
-    --output_dir $TRAINING_OUTPUT/flow \
-    --eval_output_dir $TRAINING_OUTPUT/eval_samples \
-    --eval_data_dir $OUTPUT_BASE/eval \
+    --model flow \
+    --qwen_pretrain_path $MODEL_DIR/CosyVoice-BlankEN \
+    --dataset_csv /mnt/4TB_Dataset_WD/AUDIO_DATASETS/CZECH/CZECH_30s_200hours_hranicar_oko_merged/dataset_merged.csv \
     --num_workers 4 \
     --prefetch 100
 

@@ -336,6 +336,13 @@ class CausalMaskedDiffWithDiT(torch.nn.Module):
         h = h.repeat_interleave(self.token_mel_ratio, dim=1)
         mask = mask.repeat_interleave(self.token_mel_ratio, dim=1).squeeze(dim=-1)
 
+        # Align h and feat lengths (can differ by 1 due to rounding in data preprocessing)
+        min_len = min(h.shape[1], feat.shape[1])
+        h = h[:, :min_len, :]
+        feat = feat[:, :min_len, :]
+        mask = mask[:, :min_len]
+        feat_len = torch.clamp(feat_len, max=min_len)
+
         # get conditions
         conds = torch.zeros(feat.shape, device=token.device)
         for i, j in enumerate(feat_len):

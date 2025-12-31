@@ -387,10 +387,10 @@ def padding(data, use_spk_embedding, mode='train', gan=False, dpo=False):
                                    batch_first=True,
                                    padding_value=0)
         text = [sample[i]['text'] for i in order]
-        text_token = [torch.tensor(sample[i]['text_token']) for i in order]
+        text_token = [torch.tensor(sample[i]['text_token'], dtype=torch.long) for i in order]
         text_token_len = torch.tensor([i.size(0) for i in text_token], dtype=torch.int32)
         text_token = pad_sequence(text_token, batch_first=True, padding_value=0)
-        instruct_token = [torch.tensor(sample[i]['instruct_token']) for i in order]
+        instruct_token = [torch.tensor(sample[i]['instruct_token'], dtype=torch.long) for i in order]
         instruct_token_len = torch.tensor([i.size(0) for i in instruct_token], dtype=torch.int32)
         instruct_token = pad_sequence(instruct_token, batch_first=True, padding_value=0)
         utt_embedding = torch.stack([sample[i]['utt_embedding'] for i in order], dim=0)
