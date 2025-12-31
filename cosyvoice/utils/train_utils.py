@@ -338,9 +338,11 @@ def log_per_step(writer, info_dict):
             for k, v in loss_dict.items():
                 writer.add_scalar('{}/{}'.format(tag, k), v, step + 1)
 
-    # TRAIN & CV, Shell log (stdout)
+    # TRAIN & EVAL, Shell log (stdout)
     if (info_dict['batch_idx'] + 1) % info_dict['log_interval'] == 0:
-        log_str = '{} Batch {}/{} '.format(tag, epoch, batch_idx + 1)
+        # Use "EVAL" instead of "CV" for clarity
+        display_tag = "EVAL" if tag == "CV" else tag
+        log_str = '{} Epoch {} Batch {} Step {} '.format(display_tag, epoch, batch_idx + 1, step + 1)
         for name, value in loss_dict.items():
             log_str += '{} {:.6f} '.format(name, value)
         if tag == "TRAIN":
@@ -356,7 +358,7 @@ def log_per_save(writer, info_dict):
     loss_dict = info_dict["loss_dict"]
     lr = info_dict['lr']
     logging.info(
-        'Epoch {} Step {} CV info lr {} {}'.format(
+        'Epoch {} Step {} EVAL info lr {} {}'.format(
             epoch, step + 1, lr, ' '.join(['{} {}'.format(k, v) for k, v in loss_dict.items()])))
 
     if writer is not None:

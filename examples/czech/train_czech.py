@@ -49,6 +49,7 @@ from cosyvoice.utils.train_utils import (
     wrap_cuda_model, check_modify_and_save_config,
     batch_forward, log_per_step
 )
+from cosyvoice.cli.cosyvoice import CosyVoice3
 
 # Import local eval sentences
 sys.path.insert(0, str(Path(__file__).parent))
@@ -86,6 +87,8 @@ def get_args():
     parser.add_argument('--max_checkpoints', default=3, type=int, help='Max rolling checkpoints')
     parser.add_argument('--resume', default=None, help='Resume from checkpoint dir')
     parser.add_argument('--timeout', default=60, type=int, help='Timeout for joins')
+    parser.add_argument('--tts_eval_per_step', default=500, type=int,
+                        help='Generate TTS samples every N steps (0 to disable)')
     return parser.parse_args()
 
 
@@ -201,17 +204,63 @@ class CzechExecutor(Executor):
         self.sample_rate = sample_rate
         self.best_loss = float('inf')
         self.eval_step_count = 0
+        self.cosyvoice_model = None  # Set externally
+        self.model_type = 'llm'  # Set externally
 
-    def run_evaluation_tts(self, model, cosyvoice_model, step: int):
+    def sync_weights_to_inference(self, training_model):
+        """Sync training weights to inference model for TTS eval."""
+        if self.cosyvoice_model is None:
+            return
+
+        # Get training state dict
+        if hasattr(training_model, 'module'):
+            state_dict = training_model.module.state_dict()
+        else:
+            state_dict = training_model.state_dict()
+
+        # Load into inference model's component
+        try:
+            if self.model_type == 'llm':
+                self.cosyvoice_model.model.llm.load_state_dict(state_dict, strict=False)
+            elif self.model_type == 'flow':
+                self.cosyvoice_model.model.flow.load_state_dict(state_dict, strict=False)
+            logger.info(f"Synced {self.model_type} weights to inference model")
+        except Exception as e:
+            logger.warning(f"Failed to sync weights: {e}")
+
+    def save_best_model(self, model, cv_loss: float):
+        """Save model if it's the best so far."""
+        if cv_loss < self.best_loss:
+            self.best_loss = cv_loss
+            save_path = os.path.join(self.args.model_dir, 'best_model.pt')
+
+            if hasattr(model, 'module'):
+                state_dict = model.module.state_dict()
+            else:
+                state_dict = model.state_dict()
+
+            state_dict['best_loss'] = cv_loss
+            state_dict['step'] = self.step
+            state_dict['epoch'] = self.epoch
+            torch.save(state_dict, save_path)
+            logger.info(f"New best model saved! Loss: {cv_loss:.6f} at step {self.step}")
+
+    def run_evaluation_tts(self, model, step: int):
         """Run TTS generation during evaluation.
 
         Args:
-            model: Training model
-            cosyvoice_model: Full CosyVoice model for inference
+            model: Training model (used for sync)
             step: Current training step
         """
         if self.rank != 0:
             return
+
+        if self.cosyvoice_model is None:
+            logger.warning("CosyVoice model not loaded, skipping TTS evaluation")
+            return
+
+        # Sync training weights to inference model
+        self.sync_weights_to_inference(model)
 
         output_dir = os.path.join(
             self.args.model_dir, 'audio_samples', f'eval_step_{step}'
@@ -220,7 +269,7 @@ class CzechExecutor(Executor):
 
         rng = random.Random(step)  # Different random refs each eval
 
-        logger.info(f"Generating {len(EVAL_SENTENCES)} TTS samples...")
+        logger.info(f"Generating {len(EVAL_SENTENCES)} TTS samples at step {step}...")
 
         for idx, sentence in enumerate(EVAL_SENTENCES):
             try:
@@ -230,7 +279,7 @@ class CzechExecutor(Executor):
                 ref_basename = Path(ref_audio).stem[:20]
 
                 # Use the inference method
-                for result in cosyvoice_model.inference_zero_shot(
+                for result in self.cosyvoice_model.inference_zero_shot(
                     tts_text=sentence,
                     prompt_text="",  # No prompt text needed
                     prompt_wav=ref_audio,
@@ -251,7 +300,35 @@ class CzechExecutor(Executor):
                 logger.error(f"Failed to generate sample {idx}: {e}")
                 continue
 
+        # Clean up GPU memory after TTS
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         logger.info(f"TTS samples saved to {output_dir}")
+
+    @torch.inference_mode()
+    def cv(self, model, cv_data_loader, writer, info_dict, on_batch_end=True):
+        """Override cv() to add TTS generation and best model saving.
+
+        This is called by train_one_epoc at evaluation checkpoints.
+        """
+        # Call parent cv() method for loss computation
+        super().cv(model, cv_data_loader, writer, info_dict, on_batch_end)
+
+        # Get eval loss from info_dict
+        cv_loss = info_dict['loss_dict'].get('loss', float('inf'))
+        if hasattr(cv_loss, 'item'):
+            cv_loss = cv_loss.item()
+
+        # Save best model if loss improved
+        if self.rank == 0:
+            self.save_best_model(model, cv_loss)
+
+        # Run TTS generation if at correct interval
+        tts_interval = getattr(self.args, 'tts_eval_per_step', 500)
+        if tts_interval > 0 and self.step > 0 and self.step % tts_interval == 0:
+            if self.rank == 0:
+                self.run_evaluation_tts(model, self.step)
 
 
 @record
@@ -348,10 +425,32 @@ def main():
     executor = CzechExecutor(args, speakers, configs['sample_rate'])
     executor.step = start_step
     executor.best_loss = best_loss
+    executor.model_type = args.model
+
+    # Load CosyVoice3 model for TTS evaluation (only on rank 0)
+    if rank == 0 and args.tts_eval_per_step > 0:
+        logger.info("Loading CosyVoice3 model for TTS evaluation...")
+        try:
+            cosyvoice_model = CosyVoice3(args.qwen_pretrain_path)
+            executor.cosyvoice_model = cosyvoice_model
+            logger.info("CosyVoice3 model loaded successfully for TTS evaluation")
+        except Exception as e:
+            logger.warning(f"Failed to load CosyVoice3 for TTS eval: {e}")
+            logger.warning("TTS evaluation will be disabled")
 
     logger.info(f'Starting training from step {start_step}, epoch {start_epoch + 1}')
     logger.info(f'Save every {args.save_per_step} steps, eval every {args.eval_per_step} steps')
+    logger.info(f'TTS eval every {args.tts_eval_per_step} steps')
     logger.info(f'Max rolling checkpoints: {args.max_checkpoints}')
+
+    # Initial evaluation at step 0
+    if start_step == 0:
+        logger.info("Running initial evaluation at step 0...")
+        dist.barrier()
+        executor.cv(model, cv_data_loader, writer, info_dict, on_batch_end=False)
+        # Run initial TTS if enabled
+        if rank == 0 and executor.cosyvoice_model is not None:
+            executor.run_evaluation_tts(model, 0)
 
     # Training loop
     for epoch in range(start_epoch + 1, configs['train_conf']['max_epoch']):
