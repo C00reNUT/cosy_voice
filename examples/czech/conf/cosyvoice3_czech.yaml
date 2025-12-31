@@ -164,7 +164,7 @@ train_conf:
         lr: 0.00001
     scheduler: constantlr
     scheduler_conf:
-        warmup_steps: 2500
+        warmup_steps: 100
     max_epoch: 2
     grad_clip: 5
     accum_grad: 2
