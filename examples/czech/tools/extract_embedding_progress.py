@@ -11,16 +11,21 @@ Usage:
     python extract_embedding_progress.py --dir /path/to/data --onnx_path /path/to/campplus.onnx
 """
 import argparse
+import logging
 import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import List, Tuple, Optional
 
 import onnxruntime
 import torch
 import torchaudio
 import torchaudio.compliance.kaldi as kaldi
+
+logging.basicConfig(level=logging.WARNING)
+logger = logging.getLogger(__name__)
 
 
 def single_job(utt: str, utt2wav: dict, ort_session) -> tuple:
@@ -32,18 +37,28 @@ def single_job(utt: str, utt2wav: dict, ort_session) -> tuple:
         ort_session: ONNX runtime session.
 
     Returns:
-        Tuple of (utterance_id, embedding_list).
+        Tuple of (utterance_id, embedding_list or None if file missing/error, error_msg or None).
     """
-    audio, sample_rate = torchaudio.load(utt2wav[utt])
-    if sample_rate != 16000:
-        audio = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=16000)(audio)
-    feat = kaldi.fbank(audio, num_mel_bins=80, dither=0, sample_frequency=16000)
-    feat = feat - feat.mean(dim=0, keepdim=True)
-    embedding = ort_session.run(
-        None,
-        {ort_session.get_inputs()[0].name: feat.unsqueeze(dim=0).cpu().numpy()}
-    )[0].flatten().tolist()
-    return utt, embedding
+    wav_path = utt2wav[utt]
+
+    # Pre-check file existence
+    if not os.path.exists(wav_path):
+        return utt, None, f"File not found: {wav_path}"
+
+    try:
+        audio, sample_rate = torchaudio.load(wav_path)
+        if sample_rate != 16000:
+            audio = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=16000)(audio)
+        feat = kaldi.fbank(audio, num_mel_bins=80, dither=0, sample_frequency=16000)
+        feat = feat - feat.mean(dim=0, keepdim=True)
+        embedding = ort_session.run(
+            None,
+            {ort_session.get_inputs()[0].name: feat.unsqueeze(dim=0).cpu().numpy()}
+        )[0].flatten().tolist()
+        return utt, embedding, None
+    except Exception as e:
+        error_type = type(e).__name__
+        return utt, None, f"{error_type}: {str(e)} ({wav_path})"
 
 
 def log_progress(current: int, total: int, start_time: float, skipped: int = 0, prefix: str = "") -> None:
@@ -72,28 +87,65 @@ def log_progress(current: int, total: int, start_time: float, skipped: int = 0, 
           end='', flush=True)
 
 
-def main(args: argparse.Namespace) -> None:
+def write_failed_log(failed_list: List[Tuple[str, str]], log_path: Path) -> None:
+    """Write failed utterances to log file.
+
+    Args:
+        failed_list: List of (utt_id, error_msg) tuples.
+        log_path: Path to write the log file.
+    """
+    with open(log_path, 'w') as f:
+        f.write(f"# Failed utterances log - {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"# Total failed: {len(failed_list)}\n")
+        f.write("#" + "=" * 79 + "\n")
+        for utt, error in failed_list:
+            f.write(f"{utt}\t{error}\n")
+
+
+def main(args: argparse.Namespace) -> int:
     """Main extraction function with resume capability.
 
     Args:
         args: Command line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for critical errors).
     """
+    # Validate ONNX model exists
+    if not os.path.exists(args.onnx_path):
+        print(f"ERROR: ONNX model not found: {args.onnx_path}", flush=True)
+        return 1
+
     utt_emb_path = Path(args.dir) / "utt2embedding.pt"
     spk_emb_path = Path(args.dir) / "spk2embedding.pt"
     checkpoint_path = Path(args.dir) / "embedding_checkpoint.pt"
+    failed_log_path = Path(args.dir) / "failed_embedding.log"
 
     # Load data mappings
+    wav_scp_path = Path(args.dir) / "wav.scp"
+    utt2spk_path = Path(args.dir) / "utt2spk"
+
+    if not wav_scp_path.exists():
+        print(f"ERROR: wav.scp not found: {wav_scp_path}", flush=True)
+        return 1
+    if not utt2spk_path.exists():
+        print(f"ERROR: utt2spk not found: {utt2spk_path}", flush=True)
+        return 1
+
     utt2wav, utt2spk = {}, {}
-    with open(f'{args.dir}/wav.scp') as f:
+    with open(wav_scp_path) as f:
         for line in f:
             parts = line.strip().split()
-            utt2wav[parts[0]] = parts[1]
-    with open(f'{args.dir}/utt2spk') as f:
+            if len(parts) >= 2:
+                utt2wav[parts[0]] = parts[1]
+    with open(utt2spk_path) as f:
         for line in f:
             parts = line.strip().split()
-            utt2spk[parts[0]] = parts[1]
+            if len(parts) >= 2:
+                utt2spk[parts[0]] = parts[1]
 
     total_utts = len(utt2wav)
+    print(f"Loaded {total_utts:,} utterances from wav.scp", flush=True)
 
     # Check for existing progress (checkpoint or final output)
     utt2embedding = {}
@@ -125,7 +177,7 @@ def main(args: argparse.Namespace) -> None:
                 spk2embedding[k] = torch.tensor(v).mean(dim=0).tolist()
             torch.save(spk2embedding, spk_emb_path)
             print(f"Saved spk2embedding.pt ({len(spk2embedding):,} speakers)", flush=True)
-        return
+        return 0
 
     print(f"Processing {len(utts_to_process):,} utterances ({skipped:,} already done) with {args.num_thread} threads...", flush=True)
 
@@ -142,6 +194,8 @@ def main(args: argparse.Namespace) -> None:
 
     start_time = time.time()
     completed = 0
+    failed = 0
+    failed_items: List[Tuple[str, str]] = []  # (utt_id, error_msg)
     last_log = 0
     last_checkpoint = time.time()
     checkpoint_interval = 300  # Save checkpoint every 5 minutes
@@ -149,14 +203,20 @@ def main(args: argparse.Namespace) -> None:
     total_to_process = len(utts_to_process)
 
     for future in as_completed(all_tasks):
-        utt, embedding = future.result()
-        utt2embedding[utt] = embedding
+        utt, embedding, error_msg = future.result()
 
+        # Skip failed extractions (missing/corrupted files)
+        if embedding is None:
+            failed += 1
+            failed_items.append((utt, error_msg or "Unknown error"))
+            continue
+
+        utt2embedding[utt] = embedding
         completed += 1
 
         # Log progress every 100 items
         if completed - last_log >= 100:
-            log_progress(completed, total_to_process, start_time, skipped)
+            log_progress(completed, total_to_process - failed, start_time, skipped)
             last_log = completed
 
         # Save checkpoint periodically
@@ -166,9 +226,19 @@ def main(args: argparse.Namespace) -> None:
             print(f"\n[Checkpoint saved: {len(utt2embedding):,} embeddings]", flush=True)
 
     # Final progress
-    log_progress(completed, total_to_process, start_time, skipped)
+    log_progress(completed, total_to_process - failed, start_time, skipped)
     elapsed = time.time() - start_time
-    print(f"\nCompleted {total_to_process:,} utterances in {elapsed/60:.1f} minutes ({total_to_process/elapsed:.1f} it/s)", flush=True)
+    print(f"\nCompleted {completed:,} utterances in {elapsed/60:.1f} minutes ({completed/elapsed:.1f} it/s)", flush=True)
+
+    # Write failed utterances log
+    if failed_items:
+        write_failed_log(failed_items, failed_log_path)
+        print(f"WARNING: {failed:,} files failed - details in {failed_log_path}", flush=True)
+        # Print first 5 failures
+        for utt, err in failed_items[:5]:
+            print(f"  - {utt}: {err}", flush=True)
+        if len(failed_items) > 5:
+            print(f"  ... and {len(failed_items) - 5} more", flush=True)
 
     # Compute speaker embeddings
     print("Computing speaker embeddings...", flush=True)
@@ -191,6 +261,8 @@ def main(args: argparse.Namespace) -> None:
         checkpoint_path.unlink()
         print("Removed checkpoint file", flush=True)
 
+    return 0
+
 
 if __name__ == "__main__":
     print("=== USING CUSTOM PROGRESS SCRIPT ===", flush=True)
@@ -201,4 +273,4 @@ if __name__ == "__main__":
     parser.add_argument("--no_resume", action="store_true", help="Disable auto-resume (reprocess all)")
     args = parser.parse_args()
 
-    main(args)
+    sys.exit(main(args))

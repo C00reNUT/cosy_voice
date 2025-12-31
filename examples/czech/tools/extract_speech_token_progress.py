@@ -17,6 +17,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import List, Tuple, Optional
 
 import numpy as np
 import onnxruntime
@@ -25,6 +26,10 @@ import torchaudio
 import whisper
 
 logging.basicConfig(level=logging.WARNING)
+logger = logging.getLogger(__name__)
+
+# Global list to collect failed utterances with error details
+_failed_utterances: List[Tuple[str, str, str]] = []  # (utt_id, wav_path, error_msg)
 
 
 def single_job(utt: str, utt2wav: dict, ort_session) -> tuple:
@@ -36,33 +41,42 @@ def single_job(utt: str, utt2wav: dict, ort_session) -> tuple:
         ort_session: ONNX runtime session.
 
     Returns:
-        Tuple of (utterance_id, speech_token_list).
+        Tuple of (utterance_id, speech_token_list or None if file missing/error, error_msg or None).
     """
-    audio, sample_rate = torchaudio.load(utt2wav[utt], backend='soundfile')
-    if sample_rate != 16000:
-        audio = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=16000)(audio)
-    # Convert audio to mono
-    if audio.shape[0] > 1:
-        audio = audio.mean(dim=0, keepdim=True)
+    wav_path = utt2wav[utt]
 
-    # Truncate audio to 30s if longer (instead of skipping)
-    max_samples = 30 * 16000  # 30 seconds at 16kHz
-    if audio.shape[1] > max_samples:
-        audio = audio[:, :max_samples]
+    # Pre-check file existence
+    if not os.path.exists(wav_path):
+        return utt, None, f"File not found: {wav_path}"
 
-    if audio.shape[1] > 0:
-        feat = whisper.log_mel_spectrogram(audio, n_mels=128)
-        speech_token = ort_session.run(
-            None,
-            {
-                ort_session.get_inputs()[0].name: feat.detach().cpu().numpy(),
-                ort_session.get_inputs()[1].name: np.array([feat.shape[2]], dtype=np.int32)
-            }
-        )[0].flatten().tolist()
-    else:
-        logging.warning(f'Skipping {utt}: empty audio')
-        speech_token = []
-    return utt, speech_token
+    try:
+        audio, sample_rate = torchaudio.load(wav_path, backend='soundfile')
+        if sample_rate != 16000:
+            audio = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=16000)(audio)
+        # Convert audio to mono
+        if audio.shape[0] > 1:
+            audio = audio.mean(dim=0, keepdim=True)
+
+        # Truncate audio to 30s if longer (instead of skipping)
+        max_samples = 30 * 16000  # 30 seconds at 16kHz
+        if audio.shape[1] > max_samples:
+            audio = audio[:, :max_samples]
+
+        if audio.shape[1] > 0:
+            feat = whisper.log_mel_spectrogram(audio, n_mels=128)
+            speech_token = ort_session.run(
+                None,
+                {
+                    ort_session.get_inputs()[0].name: feat.detach().cpu().numpy(),
+                    ort_session.get_inputs()[1].name: np.array([feat.shape[2]], dtype=np.int32)
+                }
+            )[0].flatten().tolist()
+        else:
+            return utt, None, f"Empty audio (0 samples): {wav_path}"
+        return utt, speech_token, None
+    except Exception as e:
+        error_type = type(e).__name__
+        return utt, None, f"{error_type}: {str(e)} ({wav_path})"
 
 
 def log_progress(current: int, total: int, start_time: float, skipped: int = 0, prefix: str = "") -> None:
@@ -91,23 +105,54 @@ def log_progress(current: int, total: int, start_time: float, skipped: int = 0, 
           end='', flush=True)
 
 
-def main(args: argparse.Namespace) -> None:
+def write_failed_log(failed_list: List[Tuple[str, str]], log_path: Path) -> None:
+    """Write failed utterances to log file.
+
+    Args:
+        failed_list: List of (utt_id, error_msg) tuples.
+        log_path: Path to write the log file.
+    """
+    with open(log_path, 'w') as f:
+        f.write(f"# Failed utterances log - {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"# Total failed: {len(failed_list)}\n")
+        f.write("#" + "=" * 79 + "\n")
+        for utt, error in failed_list:
+            f.write(f"{utt}\t{error}\n")
+
+
+def main(args: argparse.Namespace) -> int:
     """Main extraction function with resume capability.
 
     Args:
         args: Command line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for critical errors).
     """
+    # Validate ONNX model exists
+    if not os.path.exists(args.onnx_path):
+        print(f"ERROR: ONNX model not found: {args.onnx_path}", flush=True)
+        return 1
+
     token_path = Path(args.dir) / "utt2speech_token.pt"
     checkpoint_path = Path(args.dir) / "speech_token_checkpoint.pt"
+    failed_log_path = Path(args.dir) / "failed_speech_token.log"
 
     # Load data mappings
+    wav_scp_path = Path(args.dir) / "wav.scp"
+    if not wav_scp_path.exists():
+        print(f"ERROR: wav.scp not found: {wav_scp_path}", flush=True)
+        return 1
+
     utt2wav = {}
-    with open(f'{args.dir}/wav.scp') as f:
+    with open(wav_scp_path) as f:
         for line in f:
             parts = line.strip().split()
-            utt2wav[parts[0]] = parts[1]
+            if len(parts) >= 2:
+                utt2wav[parts[0]] = parts[1]
 
     total_utts = len(utt2wav)
+    print(f"Loaded {total_utts:,} utterances from wav.scp", flush=True)
 
     # Check for existing progress (checkpoint or final output)
     utt2speech_token = {}
@@ -126,7 +171,7 @@ def main(args: argparse.Namespace) -> None:
 
     if len(utts_to_process) == 0:
         print(f"All {total_utts:,} utterances already processed. Skipping extraction.", flush=True)
-        return
+        return 0
 
     print(f"Processing {len(utts_to_process):,} utterances ({skipped:,} already done) with {args.num_thread} threads...", flush=True)
 
@@ -147,6 +192,8 @@ def main(args: argparse.Namespace) -> None:
 
     start_time = time.time()
     completed = 0
+    failed = 0
+    failed_items: List[Tuple[str, str]] = []  # (utt_id, error_msg)
     last_log = 0
     last_checkpoint = time.time()
     checkpoint_interval = 300  # Save checkpoint every 5 minutes
@@ -154,14 +201,20 @@ def main(args: argparse.Namespace) -> None:
     total_to_process = len(utts_to_process)
 
     for future in as_completed(all_tasks):
-        utt, speech_token = future.result()
-        utt2speech_token[utt] = speech_token
+        utt, speech_token, error_msg = future.result()
 
+        # Skip failed extractions (missing/corrupted files)
+        if speech_token is None:
+            failed += 1
+            failed_items.append((utt, error_msg or "Unknown error"))
+            continue
+
+        utt2speech_token[utt] = speech_token
         completed += 1
 
         # Log progress every 100 items
         if completed - last_log >= 100:
-            log_progress(completed, total_to_process, start_time, skipped)
+            log_progress(completed, total_to_process - failed, start_time, skipped)
             last_log = completed
 
         # Save checkpoint periodically
@@ -171,9 +224,19 @@ def main(args: argparse.Namespace) -> None:
             print(f"\n[Checkpoint saved: {len(utt2speech_token):,} tokens]", flush=True)
 
     # Final progress
-    log_progress(completed, total_to_process, start_time, skipped)
+    log_progress(completed, total_to_process - failed, start_time, skipped)
     elapsed = time.time() - start_time
-    print(f"\nCompleted {total_to_process:,} utterances in {elapsed/60:.1f} minutes ({total_to_process/elapsed:.1f} it/s)", flush=True)
+    print(f"\nCompleted {completed:,} utterances in {elapsed/60:.1f} minutes ({completed/elapsed:.1f} it/s)", flush=True)
+
+    # Write failed utterances log
+    if failed_items:
+        write_failed_log(failed_items, failed_log_path)
+        print(f"WARNING: {failed:,} files failed - details in {failed_log_path}", flush=True)
+        # Print first 5 failures
+        for utt, err in failed_items[:5]:
+            print(f"  - {utt}: {err}", flush=True)
+        if len(failed_items) > 5:
+            print(f"  ... and {len(failed_items) - 5} more", flush=True)
 
     # Save final results
     torch.save(utt2speech_token, token_path)
@@ -184,6 +247,8 @@ def main(args: argparse.Namespace) -> None:
         checkpoint_path.unlink()
         print("Removed checkpoint file", flush=True)
 
+    return 0
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Extract speech tokens with progress tracking and resume")
@@ -193,4 +258,4 @@ if __name__ == "__main__":
     parser.add_argument("--no_resume", action="store_true", help="Disable auto-resume (reprocess all)")
     args = parser.parse_args()
 
-    main(args)
+    sys.exit(main(args))
