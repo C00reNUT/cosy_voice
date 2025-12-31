@@ -45,10 +45,12 @@ def single_job(utt: str, utt2wav: dict, ort_session) -> tuple:
     if audio.shape[0] > 1:
         audio = audio.mean(dim=0, keepdim=True)
 
-    if audio.shape[1] / 16000 > 30:
-        logging.warning(f'Skipping {utt}: audio longer than 30s')
-        speech_token = []
-    else:
+    # Truncate audio to 30s if longer (instead of skipping)
+    max_samples = 30 * 16000  # 30 seconds at 16kHz
+    if audio.shape[1] > max_samples:
+        audio = audio[:, :max_samples]
+
+    if audio.shape[1] > 0:
         feat = whisper.log_mel_spectrogram(audio, n_mels=128)
         speech_token = ort_session.run(
             None,
@@ -57,6 +59,9 @@ def single_job(utt: str, utt2wav: dict, ort_session) -> tuple:
                 ort_session.get_inputs()[1].name: np.array([feat.shape[2]], dtype=np.int32)
             }
         )[0].flatten().tolist()
+    else:
+        logging.warning(f'Skipping {utt}: empty audio')
+        speech_token = []
     return utt, speech_token
 
 
