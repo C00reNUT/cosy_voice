@@ -17,7 +17,7 @@ Usage:
     python test_czech_eval_benchmark.py --trt --vllm --method instruct2
 
 Batch Processing:
-    For higher throughput (1.65x with 4 workers), use concurrent requests:
+    For higher throughput (2x with 6 workers), use concurrent requests:
 
     from concurrent.futures import ThreadPoolExecutor
 
@@ -25,13 +25,14 @@ Batch Processing:
         for r in cosyvoice.inference_instruct2(sentence, ...):
             return r['tts_speech']
 
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    with ThreadPoolExecutor(max_workers=6) as executor:
         results = list(executor.map(infer, sentences))
 
-Performance (RTX 3090, 19 Czech sentences, 253s audio):
-    - vLLM Sequential: RTF 0.193 (5.2x real-time)
-    - vLLM Concurrent (4): RTF 0.147 (6.8x real-time, 1.65x throughput)
+Performance (RTX 3090, 19 Czech sentences, ~250s audio):
+    - vLLM Sequential: RTF 0.192 (5.2x real-time)
+    - vLLM Concurrent (6): RTF 0.099 (10.1x real-time, 2x throughput)
     - TRT+vLLM: RTF 0.191 (no significant benefit)
+    - VRAM usage: ~2.5GB (10% of 24GB) - not the bottleneck
 """
 import time
 import sys

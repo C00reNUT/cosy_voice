@@ -203,13 +203,13 @@ for result in cosyvoice.inference_instruct2(
     audio = result['tts_speech']
 ```
 
-**Performance Comparison (RTX 3090, 19 Czech sentences, 253s total audio):**
+**Performance Comparison (RTX 3090, 19 Czech sentences, ~250s total audio):**
 
 | Backend | Mode | RTF | Speed | Notes |
 |---------|------|-----|-------|-------|
 | PyTorch | Sequential | ~1.20 | 0.83x | Baseline |
-| vLLM | Sequential | 0.193 | 5.2x | Recommended |
-| vLLM | Concurrent (4) | 0.147 | 6.8x | 1.65x throughput |
+| vLLM | Sequential | 0.192 | 5.2x | Recommended |
+| vLLM | Concurrent (6) | 0.099 | 10.1x | 2x throughput |
 | TRT+vLLM | Sequential | 0.191 | 5.2x | TRT adds no benefit |
 
 **RTF** (Real-Time Factor): time to generate / audio duration. Lower = faster.
@@ -231,8 +231,8 @@ def infer(sentence):
     ):
         return r['tts_speech']
 
-# Process 4 sentences concurrently for 1.65x throughput
-with ThreadPoolExecutor(max_workers=4) as executor:
+# Process 6 sentences concurrently for 2x throughput (10.1x real-time)
+with ThreadPoolExecutor(max_workers=6) as executor:
     results = list(executor.map(infer, sentences))
 ```
 
