@@ -8,6 +8,21 @@
 
 **CosyVoice 1.0**: [Demos](https://fun-audio-llm.github.io); [Paper](https://funaudiollm.github.io/pdf/CosyVoice_v1.pdf); [Modelscope](https://www.modelscope.cn/models/iic/CosyVoice-300M); [HuggingFace](https://huggingface.co/FunAudioLLM/CosyVoice-300M)
 
+## Quick Reference
+
+| File | Purpose | Use When |
+|------|---------|----------|
+| `example.py` | Basic inference examples | Learning API, single inferences |
+| `vllm_example.py` | vLLM accelerated inference | Production, batch processing |
+| `webui.py` | Gradio web interface | Interactive demo |
+| `test_czech_eval_benchmark.py` | Czech TTS benchmark | Performance testing only |
+
+**Micromamba env:** `cosyvoice` (or `cosyvoice_vllm` for vLLM)
+
+**Model paths:**
+- Pre-trained: `pretrained_models/Fun-CosyVoice3-0.5B`
+- Fine-tuned: `/path/to/your/CosyVoice3-YourModel`
+
 ## Highlight🔥
 
 **Fun-CosyVoice 3.0** is an advanced text-to-speech (TTS) system based on large language models (LLM), surpassing its predecessor (CosyVoice 2.0) in content consistency, speaker similarity, and prosody naturalness. It is designed for zero-shot multilingual speech synthesis in the wild.

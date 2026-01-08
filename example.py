@@ -1,3 +1,25 @@
+#!/usr/bin/env python3
+"""CosyVoice basic inference examples.
+
+Demonstrates all inference methods for CosyVoice v1, v2, and v3 models.
+
+Micromamba env: cosyvoice
+
+Model paths:
+    - CosyVoice v1: pretrained_models/CosyVoice-300M-SFT
+    - CosyVoice v2: pretrained_models/CosyVoice2-0.5B
+    - CosyVoice v3: pretrained_models/Fun-CosyVoice3-0.5B
+
+Usage:
+    python example.py
+
+Inference methods:
+    - inference_sft(): Pre-trained speaker synthesis
+    - inference_zero_shot(): Reference-based voice cloning
+    - inference_cross_lingual(): Cross-lingual synthesis
+    - inference_instruct()/inference_instruct2(): Instruction-controlled
+    - inference_vc(): Voice conversion
+"""
 import sys
 sys.path.append('third_party/Matcha-TTS')
 from cosyvoice.cli.cosyvoice import AutoModel

@@ -1,3 +1,38 @@
+#!/usr/bin/env python3
+"""CosyVoice vLLM accelerated inference examples.
+
+Provides 5-10x speedup over PyTorch baseline using vLLM backend.
+
+Micromamba env: cosyvoice_vllm
+
+Model paths:
+    - CosyVoice v2: pretrained_models/CosyVoice2-0.5B
+    - CosyVoice v3: pretrained_models/Fun-CosyVoice3-0.5B
+    - Fine-tuned: /path/to/CosyVoice3-YourModel
+
+Usage:
+    python vllm_example.py
+
+AutoModel flags:
+    - load_vllm=True: Enable vLLM backend (5x speedup)
+    - load_trt=True: Enable TensorRT for DiT decoder
+    - load_jit=True: Enable TorchScript JIT
+    - fp16=True/False: Half precision (True for v2, False for v3)
+
+Batch processing for higher throughput (2x with 6 workers):
+    from concurrent.futures import ThreadPoolExecutor
+
+    def infer(text):
+        for r in cosyvoice.inference_instruct2(text, ...):
+            return r['tts_speech']
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        results = list(executor.map(infer, sentences))
+
+Performance (RTX 3090):
+    - Sequential: RTF 0.192 (5.2x real-time)
+    - Concurrent (6 workers): RTF 0.099 (10.1x real-time)
+"""
 import sys
 sys.path.append('third_party/Matcha-TTS')
 from vllm import ModelRegistry
