@@ -12,16 +12,56 @@
 
 | File | Purpose | Use When |
 |------|---------|----------|
+| `inference.py` | **Main inference CLI** | Production TTS synthesis |
 | `example.py` | Basic inference examples | Learning API, single inferences |
-| `vllm_example.py` | vLLM accelerated inference | Production, batch processing |
+| `vllm_example.py` | vLLM accelerated inference | Performance testing |
 | `webui.py` | Gradio web interface | Interactive demo |
-| `test_czech_eval_benchmark.py` | Czech TTS benchmark | Performance testing only |
+| `test_czech_eval_benchmark.py` | Czech TTS benchmark | Benchmarking only |
 
 **Micromamba env:** `cosyvoice` (or `cosyvoice_vllm` for vLLM)
 
 **Model paths:**
 - Pre-trained: `pretrained_models/Fun-CosyVoice3-0.5B`
 - Fine-tuned: `/path/to/your/CosyVoice3-YourModel`
+
+## CLI Inference
+
+```bash
+# Single sentence with vLLM (5x faster)
+python inference.py --text "Your text here" \
+    --prompt-wav /path/to/reference.wav \
+    --output output.wav --vllm
+
+# Multiple sentences from file (one per line)
+python inference.py --file sentences.txt \
+    --prompt-wav /path/to/reference.wav \
+    --output-dir ./outputs --vllm
+
+# With generation parameters
+python inference.py --text "Controlled synthesis" \
+    --prompt-wav ref.wav --vllm \
+    --temperature 0.8 --top-k 50 --top-p 0.9 --speed 1.1
+```
+
+**Required:** `--prompt-wav` (reference audio, max 30s, recommended 3-10s)
+
+**Input:** `--text "sentence"` OR `--file sentences.txt`
+
+**CLI Arguments:**
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--text` | - | Single sentence to synthesize |
+| `--file` | - | Text file (one sentence per line) |
+| `--prompt-wav` | required | Reference audio path |
+| `--output` | output.wav | Output file (single text) |
+| `--output-dir` | ./outputs | Output directory (file input) |
+| `--model-dir` | CosyVoice3 | Model directory path |
+| `--method` | instruct2 | `instruct2` or `cross_lingual` |
+| `--vllm` | False | Enable vLLM (5x speedup) |
+| `--temperature` | 1.0 | LLM temperature |
+| `--top-k` | 25 | Top-K sampling |
+| `--top-p` | 1.0 | Nucleus sampling |
+| `--speed` | 1.0 | Speech speed multiplier |
 
 ## Highlight🔥
 
