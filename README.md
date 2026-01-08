@@ -203,15 +203,38 @@ for result in cosyvoice.inference_instruct2(
     audio = result['tts_speech']
 ```
 
-**Performance Comparison (RTX 3090, 19 Czech sentences, 247s total audio):**
+**Performance Comparison (RTX 3090, 19 Czech sentences, 253s total audio):**
 
-| Backend | RTF | Speed | Notes |
-|---------|-----|-------|-------|
-| PyTorch | ~1.20 | 0.83x | Baseline, slower than real-time |
-| vLLM | 0.194 | 5.2x | Recommended for production |
-| TRT+vLLM | 0.195 | 5.1x | TensorRT adds no benefit |
+| Backend | Mode | RTF | Speed | Notes |
+|---------|------|-----|-------|-------|
+| PyTorch | Sequential | ~1.20 | 0.83x | Baseline |
+| vLLM | Sequential | 0.193 | 5.2x | Recommended |
+| vLLM | Concurrent (4) | 0.147 | 6.8x | 1.65x throughput |
+| TRT+vLLM | Sequential | 0.191 | 5.2x | TRT adds no benefit |
 
 **RTF** (Real-Time Factor): time to generate / audio duration. Lower = faster.
+
+**Batch Processing with vLLM:**
+
+For higher throughput, process multiple sentences concurrently:
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+
+def infer(sentence):
+    for r in cosyvoice.inference_instruct2(
+        tts_text=sentence,
+        instruct_text="You are a helpful assistant.<|endofprompt|>",
+        prompt_wav="path/to/reference.wav",
+        stream=False,
+        text_frontend=False
+    ):
+        return r['tts_speech']
+
+# Process 4 sentences concurrently for 1.65x throughput
+with ThreadPoolExecutor(max_workers=4) as executor:
+    results = list(executor.map(infer, sentences))
+```
 
 #### Start web demo
 

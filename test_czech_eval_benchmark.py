@@ -5,6 +5,33 @@ Tests both inference_cross_lingual and inference_instruct2 methods
 using the Czech evaluation sentences from examples/czech.
 
 Micromamba env: cosyvoice
+
+Usage:
+    # Sequential vLLM inference (5.2x real-time)
+    python test_czech_eval_benchmark.py --vllm --method instruct2
+
+    # With custom generation parameters
+    python test_czech_eval_benchmark.py --vllm --method instruct2 --temperature 0.8
+
+    # TensorRT + vLLM (minimal improvement over vLLM-only)
+    python test_czech_eval_benchmark.py --trt --vllm --method instruct2
+
+Batch Processing:
+    For higher throughput (1.65x with 4 workers), use concurrent requests:
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    def infer(sentence):
+        for r in cosyvoice.inference_instruct2(sentence, ...):
+            return r['tts_speech']
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(infer, sentences))
+
+Performance (RTX 3090, 19 Czech sentences, 253s audio):
+    - vLLM Sequential: RTF 0.193 (5.2x real-time)
+    - vLLM Concurrent (4): RTF 0.147 (6.8x real-time, 1.65x throughput)
+    - TRT+vLLM: RTF 0.191 (no significant benefit)
 """
 import time
 import sys
