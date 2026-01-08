@@ -13,6 +13,9 @@ Usage:
     # With custom generation parameters
     python test_czech_eval_benchmark.py --vllm --method instruct2 --temperature 0.8
 
+    # With custom reference audio (max 30s, recommended 3-10s)
+    python test_czech_eval_benchmark.py --vllm --method instruct2 --prompt-wav /path/to/audio.wav
+
     # TensorRT + vLLM (minimal improvement over vLLM-only)
     python test_czech_eval_benchmark.py --trt --vllm --method instruct2
 
@@ -62,8 +65,8 @@ from cosyvoice.cli.cosyvoice import AutoModel
 from examples.czech.local.eval_sentences import get_eval_sentences
 
 MODEL_DIR = '/mnt/8TB/AUDIO/TEXT_TO_SPEECH/MODELS/CosyVoice3-Czech-HobbitDeep'
-# Use 7s hobbit reference (from 12s dataset) - optimal for vLLM/TRT
-PROMPT_WAV = '/mnt/8TB/PYTHON_CODE/PROJECTS/audio_dataset_maker/Hobbit_deep_12s_Dataset/segments/hobbit_deep_voice_PART_ONE_var2_segment_0000.wav'
+# Default reference audio - 7s hobbit (max 30s, recommended 3-10s)
+DEFAULT_PROMPT_WAV = '/mnt/8TB/PYTHON_CODE/PROJECTS/audio_dataset_maker/Hobbit_deep_12s_Dataset/segments/hobbit_deep_voice_PART_ONE_var2_segment_0000.wav'
 OUTPUT_DIR = './outputs/czech_eval_hobbit'
 
 # Default instruction for instruct2 method
@@ -80,7 +83,7 @@ def format_prompt_text(text: str) -> str:
     return prompt_text
 
 
-def run_benchmark(cosyvoice, sentences, method='cross_lingual', output_subdir='', output_base=None,
+def run_benchmark(cosyvoice, sentences, prompt_wav, method='cross_lingual', output_subdir='', output_base=None,
                   sampling=25, temperature=1.0, top_p=1.0):
     """Run benchmark with specified inference method."""
     base = output_base or OUTPUT_DIR
@@ -103,7 +106,7 @@ def run_benchmark(cosyvoice, sentences, method='cross_lingual', output_subdir=''
         if method == 'cross_lingual':
             for r in cosyvoice.inference_cross_lingual(
                 sentence,
-                PROMPT_WAV,
+                prompt_wav,
                 stream=False,
                 speed=1.0
             ):
@@ -113,7 +116,7 @@ def run_benchmark(cosyvoice, sentences, method='cross_lingual', output_subdir=''
             for r in cosyvoice.inference_instruct2(
                 tts_text=sentence,
                 instruct_text=prompt_text,
-                prompt_wav=PROMPT_WAV,
+                prompt_wav=prompt_wav,
                 stream=False,
                 speed=1.0,
                 text_frontend=False,  # Preserve Czech diacritics
@@ -171,6 +174,8 @@ def main():
     parser.add_argument('--temperature', type=float, default=1.0, help='LLM temperature (default: 1.0)')
     parser.add_argument('--top-k', type=int, default=25, help='LLM top_k sampling (default: 25)')
     parser.add_argument('--top-p', type=float, default=1.0, help='LLM top_p nucleus sampling (default: 1.0)')
+    parser.add_argument('--prompt-wav', type=str, default=DEFAULT_PROMPT_WAV,
+                        help='Reference audio path (max 30s, recommended 3-10s)')
     args = parser.parse_args()
 
     # Determine backend name
@@ -208,7 +213,8 @@ def main():
 
     # Warmup
     print('\nWarmup...')
-    for r in cosyvoice.inference_cross_lingual('Test warmup.', PROMPT_WAV, stream=False):
+    print(f'Using reference audio: {args.prompt_wav}')
+    for r in cosyvoice.inference_cross_lingual('Test warmup.', args.prompt_wav, stream=False):
         pass
 
     # Run benchmarks
@@ -222,14 +228,14 @@ def main():
     # Test methods based on args
     if args.method in ['both', 'cross_lingual']:
         results['cross_lingual'] = run_benchmark(
-            cosyvoice, sentences, method='cross_lingual',
+            cosyvoice, sentences, args.prompt_wav, method='cross_lingual',
             output_subdir='cross_lingual', output_base=output_base,
             **sampling_params
         )
 
     if args.method in ['both', 'instruct2']:
         results['instruct2'] = run_benchmark(
-            cosyvoice, sentences, method='instruct2',
+            cosyvoice, sentences, args.prompt_wav, method='instruct2',
             output_subdir='instruct2', output_base=output_base,
             **sampling_params
         )
