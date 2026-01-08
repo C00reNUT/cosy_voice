@@ -33,6 +33,11 @@ Performance (RTX 3090, 19 Czech sentences, ~250s audio):
     - vLLM Concurrent (6): RTF 0.099 (10.1x real-time, 2x throughput)
     - TRT+vLLM: RTF 0.191 (no significant benefit)
     - VRAM usage: ~2.5GB (10% of 24GB) - not the bottleneck
+
+Reference Audio:
+    - Maximum: 30 seconds (hard limit in frontend.py, crashes if exceeded)
+    - Recommended: 3-10 seconds for optimal quality
+    - Current benchmark uses 7s hobbit reference
 """
 import time
 import sys

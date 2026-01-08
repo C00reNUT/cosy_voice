@@ -236,6 +236,12 @@ with ThreadPoolExecutor(max_workers=6) as executor:
     results = list(executor.map(infer, sentences))
 ```
 
+**Reference Audio Requirements:**
+- **Maximum duration**: 30 seconds (hard limit, will crash if exceeded)
+- **Recommended**: 3-10 seconds of clean speech
+- **Sample rate**: Auto-resampled (16kHz for tokenization, 24kHz for features)
+- **Quality tips**: Use clear speech without background noise
+
 #### Start web demo
 
 You can use our web demo page to get familiar with CosyVoice quickly.
