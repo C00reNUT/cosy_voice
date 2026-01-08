@@ -29,8 +29,9 @@ from cosyvoice.cli.cosyvoice import AutoModel
 from examples.czech.local.eval_sentences import get_eval_sentences
 
 MODEL_DIR = '/mnt/8TB/AUDIO/TEXT_TO_SPEECH/MODELS/CosyVoice3-Czech-HobbitDeep'
-PROMPT_WAV = './asset/zero_shot_prompt.wav'
-OUTPUT_DIR = './outputs/czech_eval'
+# Use 7s hobbit reference (from 12s dataset) - optimal for vLLM/TRT
+PROMPT_WAV = '/mnt/8TB/PYTHON_CODE/PROJECTS/audio_dataset_maker/Hobbit_deep_12s_Dataset/segments/hobbit_deep_voice_PART_ONE_var2_segment_0000.wav'
+OUTPUT_DIR = './outputs/czech_eval_hobbit'
 
 # Default instruction for instruct2 method
 DEFAULT_INSTRUCT = "You are a helpful assistant.<|endofprompt|>"
@@ -46,9 +47,10 @@ def format_prompt_text(text: str) -> str:
     return prompt_text
 
 
-def run_benchmark(cosyvoice, sentences, method='cross_lingual', output_subdir=''):
+def run_benchmark(cosyvoice, sentences, method='cross_lingual', output_subdir='', output_base=None):
     """Run benchmark with specified inference method."""
-    output_path = os.path.join(OUTPUT_DIR, output_subdir) if output_subdir else OUTPUT_DIR
+    base = output_base or OUTPUT_DIR
+    output_path = os.path.join(base, output_subdir) if output_subdir else base
     os.makedirs(output_path, exist_ok=True)
 
     print(f'\n{"="*70}')
@@ -121,8 +123,26 @@ def run_benchmark(cosyvoice, sentences, method='cross_lingual', output_subdir=''
 
 def main():
     """Run Czech evaluation benchmark."""
+    import argparse
+    parser = argparse.ArgumentParser(description='CosyVoice3 Czech Benchmark')
+    parser.add_argument('--trt', action='store_true', help='Enable TensorRT')
+    parser.add_argument('--vllm', action='store_true', help='Enable vLLM')
+    parser.add_argument('--method', choices=['both', 'cross_lingual', 'instruct2'],
+                        default='both', help='Inference method to test')
+    args = parser.parse_args()
+
+    # Determine backend name
+    if args.trt and args.vllm:
+        backend = 'TRT+vLLM'
+    elif args.trt:
+        backend = 'TensorRT'
+    elif args.vllm:
+        backend = 'vLLM'
+    else:
+        backend = 'PyTorch'
+
     print('='*70)
-    print('CosyVoice3 Czech - Eval Sentences Benchmark')
+    print(f'CosyVoice3 Czech - Eval Sentences Benchmark [{backend}]')
     print('='*70)
 
     # Load eval sentences
@@ -130,16 +150,19 @@ def main():
     print(f'\nLoaded {len(sentences)} Czech evaluation sentences')
 
     # Load model
-    print('\nLoading model with TensorRT + vLLM...')
+    print(f'\nLoading model with {backend}...')
     start = time.time()
     cosyvoice = AutoModel(
         model_dir=MODEL_DIR,
-        load_trt=True,
-        load_vllm=True,
+        load_trt=args.trt,
+        load_vllm=args.vllm,
         fp16=False
     )
     load_time = time.time() - start
     print(f'Model loaded in {load_time:.1f}s')
+
+    # Update output dir with backend name
+    output_base = f'{OUTPUT_DIR}_{backend.lower().replace("+", "_")}'
 
     # Warmup
     print('\nWarmup...')
@@ -149,19 +172,22 @@ def main():
     # Run benchmarks
     results = {}
 
-    # Test cross_lingual method
-    results['cross_lingual'] = run_benchmark(
-        cosyvoice, sentences, method='cross_lingual', output_subdir='cross_lingual'
-    )
+    # Test methods based on args
+    if args.method in ['both', 'cross_lingual']:
+        results['cross_lingual'] = run_benchmark(
+            cosyvoice, sentences, method='cross_lingual',
+            output_subdir='cross_lingual', output_base=output_base
+        )
 
-    # Test instruct2 method
-    results['instruct2'] = run_benchmark(
-        cosyvoice, sentences, method='instruct2', output_subdir='instruct2'
-    )
+    if args.method in ['both', 'instruct2']:
+        results['instruct2'] = run_benchmark(
+            cosyvoice, sentences, method='instruct2',
+            output_subdir='instruct2', output_base=output_base
+        )
 
     # Summary comparison
     print('\n' + '='*70)
-    print('COMPARISON SUMMARY')
+    print(f'COMPARISON SUMMARY [{backend}]')
     print('='*70)
     print(f'{"Method":<15} | {"Total Audio":>12} | {"Total Time":>12} | {"Avg RTF":>8} | {"Speed":>10}')
     print('-'*70)
@@ -170,7 +196,7 @@ def main():
         print(f'{method:<15} | {data["total_audio"]:>10.1f}s | {data["total_time"]:>10.1f}s | {data["avg_rtf"]:>8.3f} | {speed:>10}')
     print('='*70)
 
-    print(f'\nOutput files saved to: {OUTPUT_DIR}/')
+    print(f'\nOutput files saved to: {output_base}/')
 
 
 if __name__ == '__main__':

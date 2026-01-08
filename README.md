@@ -167,6 +167,52 @@ pip install vllm==v0.11.0 transformers==4.57.1 numpy==1.26.4 -i https://mirrors.
 python vllm_example.py
 ```
 
+#### Fine-tuned Model Inference (Czech Example)
+
+When using SFT (supervised fine-tuned) models, you **must use `inference_instruct2()`** instead of `inference_cross_lingual()`.
+
+**Why `cross_lingual` doesn't work for fine-tuned models:**
+
+| Method | LLM Input | Result |
+|--------|-----------|--------|
+| `cross_lingual` | speech tokens, no instruction | Out-of-distribution, poor quality |
+| `instruct2` | instruction text + speaker embedding | In-distribution, correct output |
+
+Fine-tuned models expect `[instruction] + [speaker embedding]` format. The `cross_lingual` method passes speech tokens without instruction text, which is out-of-distribution for SFT-style training.
+
+**Code example:**
+```python
+from cosyvoice.cli.cosyvoice import AutoModel
+
+# Load fine-tuned model with vLLM acceleration
+cosyvoice = AutoModel(
+    model_dir='path/to/CosyVoice3-Czech-HobbitDeep',
+    load_vllm=True,  # Enable vLLM for 5x speedup
+    fp16=False
+)
+
+# Use instruct2 - NOT cross_lingual!
+for result in cosyvoice.inference_instruct2(
+    tts_text="Czech text here",
+    instruct_text="You are a helpful assistant.<|endofprompt|>",
+    prompt_wav="path/to/reference.wav",
+    stream=False,
+    speed=1.0,
+    text_frontend=False  # Preserve Czech diacritics
+):
+    audio = result['tts_speech']
+```
+
+**Performance Comparison (RTX 3090, 19 Czech sentences, 247s total audio):**
+
+| Backend | RTF | Speed | Notes |
+|---------|-----|-------|-------|
+| PyTorch | ~1.20 | 0.83x | Baseline, slower than real-time |
+| vLLM | 0.194 | 5.2x | Recommended for production |
+| TRT+vLLM | 0.195 | 5.1x | TensorRT adds no benefit |
+
+**RTF** (Real-Time Factor): time to generate / audio duration. Lower = faster.
+
 #### Start web demo
 
 You can use our web demo page to get familiar with CosyVoice quickly.
