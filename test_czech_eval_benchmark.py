@@ -47,7 +47,8 @@ def format_prompt_text(text: str) -> str:
     return prompt_text
 
 
-def run_benchmark(cosyvoice, sentences, method='cross_lingual', output_subdir='', output_base=None):
+def run_benchmark(cosyvoice, sentences, method='cross_lingual', output_subdir='', output_base=None,
+                  sampling=25, temperature=1.0, top_p=1.0):
     """Run benchmark with specified inference method."""
     base = output_base or OUTPUT_DIR
     output_path = os.path.join(base, output_subdir) if output_subdir else base
@@ -55,6 +56,8 @@ def run_benchmark(cosyvoice, sentences, method='cross_lingual', output_subdir=''
 
     print(f'\n{"="*70}')
     print(f'Method: {method}')
+    if sampling != 25 or temperature != 1.0 or top_p != 1.0:
+        print(f'Sampling: top_k={sampling}, temperature={temperature}, top_p={top_p}')
     print(f'{"="*70}')
 
     results = []
@@ -80,7 +83,10 @@ def run_benchmark(cosyvoice, sentences, method='cross_lingual', output_subdir=''
                 prompt_wav=PROMPT_WAV,
                 stream=False,
                 speed=1.0,
-                text_frontend=False  # Preserve Czech diacritics
+                text_frontend=False,  # Preserve Czech diacritics
+                sampling=sampling,
+                temperature=temperature,
+                top_p=top_p
             ):
                 audio = r['tts_speech']
         else:
@@ -129,6 +135,9 @@ def main():
     parser.add_argument('--vllm', action='store_true', help='Enable vLLM')
     parser.add_argument('--method', choices=['both', 'cross_lingual', 'instruct2'],
                         default='both', help='Inference method to test')
+    parser.add_argument('--temperature', type=float, default=1.0, help='LLM temperature (default: 1.0)')
+    parser.add_argument('--top-k', type=int, default=25, help='LLM top_k sampling (default: 25)')
+    parser.add_argument('--top-p', type=float, default=1.0, help='LLM top_p nucleus sampling (default: 1.0)')
     args = parser.parse_args()
 
     # Determine backend name
@@ -171,18 +180,25 @@ def main():
 
     # Run benchmarks
     results = {}
+    sampling_params = {
+        'sampling': getattr(args, 'top_k', 25),
+        'temperature': args.temperature,
+        'top_p': getattr(args, 'top_p', 1.0)
+    }
 
     # Test methods based on args
     if args.method in ['both', 'cross_lingual']:
         results['cross_lingual'] = run_benchmark(
             cosyvoice, sentences, method='cross_lingual',
-            output_subdir='cross_lingual', output_base=output_base
+            output_subdir='cross_lingual', output_base=output_base,
+            **sampling_params
         )
 
     if args.method in ['both', 'instruct2']:
         results['instruct2'] = run_benchmark(
             cosyvoice, sentences, method='instruct2',
-            output_subdir='instruct2', output_base=output_base
+            output_subdir='instruct2', output_base=output_base,
+            **sampling_params
         )
 
     # Summary comparison

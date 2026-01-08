@@ -448,6 +448,8 @@ class Qwen2LM(TransformerLM):
             prompt_speech_token_len: torch.Tensor,
             embedding: torch.Tensor,
             sampling: int = 25,
+            temperature: float = 1.0,
+            top_p: float = 1.0,
             max_token_text_ratio: float = 20,
             min_token_text_ratio: float = 2,
             uuid: str = '',
@@ -471,14 +473,16 @@ class Qwen2LM(TransformerLM):
         max_len = int((text_len - prompt_text_len) * max_token_text_ratio)
 
         # 5. step by step decode
-        for token in self.inference_wrapper(lm_input, sampling, min_len, max_len, uuid):
+        for token in self.inference_wrapper(lm_input, sampling, temperature, top_p, min_len, max_len, uuid):
             yield token
 
     @torch.inference_mode()
-    def inference_wrapper(self, lm_input, sampling, min_len, max_len, uuid):
+    def inference_wrapper(self, lm_input, sampling, temperature, top_p, min_len, max_len, uuid):
         if hasattr(self, 'vllm'):
             from vllm import SamplingParams, RequestOutput
             sampling_params = SamplingParams(top_k=sampling,
+                                             temperature=temperature,
+                                             top_p=top_p,
                                              stop_token_ids=self.stop_token_ids,
                                              min_tokens=min_len,
                                              max_tokens=max_len)
@@ -531,6 +535,8 @@ class Qwen2LM(TransformerLM):
             prompt_speech_token_len: torch.Tensor,
             embedding: torch.Tensor,
             sampling: int = 25,
+            temperature: float = 1.0,
+            top_p: float = 1.0,
             max_token_text_ratio: float = 20,
             min_token_text_ratio: float = 2,
     ) -> Generator[torch.Tensor, None, None]:
@@ -718,6 +724,8 @@ class CosyVoice3LM(Qwen2LM):
             prompt_speech_token_len: torch.Tensor,
             embedding: torch.Tensor,
             sampling: int = 25,
+            temperature: float = 1.0,
+            top_p: float = 1.0,
             max_token_text_ratio: float = 20,
             min_token_text_ratio: float = 2,
             uuid: str = '',
@@ -741,5 +749,5 @@ class CosyVoice3LM(Qwen2LM):
         max_len = int((text_len - prompt_text_len) * max_token_text_ratio)
 
         # 5. step by step decode
-        for token in self.inference_wrapper(lm_input, sampling, min_len, max_len, uuid):
+        for token in self.inference_wrapper(lm_input, sampling, temperature, top_p, min_len, max_len, uuid):
             yield token
