@@ -31,6 +31,10 @@ class Executor:
         self.dpo_loss = dpo_loss
         self.step = 0
         self.epoch = 0
+        self.epoch_start_step = 0
+        self.steps_in_epoch = 0
+        self.steps_per_epoch_actual = 0
+        self.stop_training = False
         self.rank = int(os.environ.get('RANK', 0))
         self.device = torch.device('cuda:{}'.format(self.rank))
 
@@ -42,6 +46,8 @@ class Executor:
         logging.info('Epoch {} TRAIN info lr {}'.format(self.epoch, lr))
         logging.info('using accumulate grad, new batch size is {} times'
                      ' larger than before'.format(info_dict['accum_grad']))
+        self.epoch_start_step = self.step
+        self.steps_in_epoch = 0
         # A context manager to be used in conjunction with an instance of
         # torch.nn.parallel.DistributedDataParallel to be able to train
         # with uneven inputs across participating processes.
@@ -55,6 +61,10 @@ class Executor:
                 info_dict["step"] = self.step
                 info_dict["epoch"] = self.epoch
                 info_dict["batch_idx"] = batch_idx
+                info_dict["epoch_start_step"] = self.epoch_start_step
+                if self.steps_per_epoch_actual > 0:
+                    info_dict["steps_per_epoch_actual"] = self.steps_per_epoch_actual
+                    info_dict["total_steps_actual"] = self.steps_per_epoch_actual * info_dict.get("max_epoch", 0)
                 if cosyvoice_join(group_join, info_dict):
                     break
 
@@ -74,16 +84,43 @@ class Executor:
 
                 info_dict = update_parameter_and_lr(model, optimizer, scheduler, scaler, info_dict)
                 log_per_step(writer, info_dict)
-                # NOTE specify save_per_step in cosyvoice.yaml if you want to enable step save
-                if info_dict['save_per_step'] > 0 and (self.step + 1) % info_dict['save_per_step'] == 0 and \
-                   (batch_idx + 1) % info_dict["accum_grad"] == 0:
+                eval_per_step = info_dict.get('eval_per_step', 0)
+                save_per_step = info_dict.get('save_per_step', 0)
+                eval_due = eval_per_step > 0 and (self.step + 1) % eval_per_step == 0 and \
+                    (batch_idx + 1) % info_dict["accum_grad"] == 0
+                save_due = save_per_step > 0 and (self.step + 1) % save_per_step == 0 and \
+                    (batch_idx + 1) % info_dict["accum_grad"] == 0
+                if eval_due:
                     dist.barrier()
                     self.cv(model, cv_data_loader, writer, info_dict, on_batch_end=False)
                     model.train()
+                elif save_due:
+                    dist.barrier()
+                    self.save_step_checkpoint(model, info_dict)
+                    model.train()
                 if (batch_idx + 1) % info_dict["accum_grad"] == 0:
                     self.step += 1
+                    self.steps_in_epoch += 1
+                    # Hook for subclass-specific per-step actions (e.g., TTS eval)
+                    self.on_step_end(model, info_dict)
+                    max_steps = info_dict.get('max_steps', 0)
+                    if max_steps and self.step >= max_steps:
+                        logging.info('Reached max_steps %s at step %s; stopping early.',
+                                     max_steps, self.step)
+                        self.stop_training = True
+                        break
         dist.barrier()
-        self.cv(model, cv_data_loader, writer, info_dict, on_batch_end=True)
+        if self.stop_training:
+            return
+        if self.steps_in_epoch > 0:
+            self.steps_per_epoch_actual = self.steps_in_epoch
+            info_dict["steps_per_epoch_actual"] = self.steps_per_epoch_actual
+            info_dict["total_steps_actual"] = self.steps_per_epoch_actual * info_dict.get("max_epoch", 0)
+            info_dict["epoch_start_step"] = self.epoch_start_step
+        eval_per_epoch = info_dict.get('eval_per_epoch', 1)
+        eval_due_epoch = eval_per_epoch > 0 and (self.epoch + 1) % eval_per_epoch == 0
+        if eval_due_epoch:
+            self.cv(model, cv_data_loader, writer, info_dict, on_batch_end=True)
 
     def train_one_epoc_gan(self, model, optimizer, scheduler, optimizer_d, scheduler_d, train_data_loader, cv_data_loader,
                            writer, info_dict, scaler, group_join):
@@ -94,6 +131,8 @@ class Executor:
         logging.info('Epoch {} TRAIN info lr {}'.format(self.epoch, lr))
         logging.info('using accumulate grad, new batch size is {} times'
                      ' larger than before'.format(info_dict['accum_grad']))
+        self.epoch_start_step = self.step
+        self.steps_in_epoch = 0
         # A context manager to be used in conjunction with an instance of
         # torch.nn.parallel.DistributedDataParallel to be able to train
         # with uneven inputs across participating processes.
@@ -105,6 +144,10 @@ class Executor:
                 info_dict["step"] = self.step
                 info_dict["epoch"] = self.epoch
                 info_dict["batch_idx"] = batch_idx
+                info_dict["epoch_start_step"] = self.epoch_start_step
+                if self.steps_per_epoch_actual > 0:
+                    info_dict["steps_per_epoch_actual"] = self.steps_per_epoch_actual
+                    info_dict["total_steps_actual"] = self.steps_per_epoch_actual * info_dict.get("max_epoch", 0)
                 if cosyvoice_join(group_join, info_dict):
                     break
 
@@ -132,16 +175,44 @@ class Executor:
                 info_dict = update_parameter_and_lr(model, optimizer, scheduler, scaler, info_dict)
                 optimizer_d.zero_grad()
                 log_per_step(writer, info_dict)
-                # NOTE specify save_per_step in cosyvoice.yaml if you want to enable step save
-                if info_dict['save_per_step'] > 0 and (self.step + 1) % info_dict['save_per_step'] == 0 and \
-                   (batch_idx + 1) % info_dict["accum_grad"] == 0:
+                eval_per_step = info_dict.get('eval_per_step', 0)
+                save_per_step = info_dict.get('save_per_step', 0)
+                eval_due = eval_per_step > 0 and (self.step + 1) % eval_per_step == 0 and \
+                    (batch_idx + 1) % info_dict["accum_grad"] == 0
+                save_due = save_per_step > 0 and (self.step + 1) % save_per_step == 0 and \
+                    (batch_idx + 1) % info_dict["accum_grad"] == 0
+                if eval_due:
                     dist.barrier()
                     self.cv(model, cv_data_loader, writer, info_dict, on_batch_end=False)
                     model.train()
+                elif save_due:
+                    dist.barrier()
+                    self.save_step_checkpoint(model, info_dict)
+                    model.train()
                 if (batch_idx + 1) % info_dict["accum_grad"] == 0:
                     self.step += 1
+                    self.steps_in_epoch += 1
+                    # Hook for subclass-specific per-step actions (e.g., TTS eval)
+                    self.on_step_end(model, info_dict)
         dist.barrier()
-        self.cv(model, cv_data_loader, writer, info_dict, on_batch_end=True)
+        if self.steps_in_epoch > 0:
+            self.steps_per_epoch_actual = self.steps_in_epoch
+            info_dict["steps_per_epoch_actual"] = self.steps_per_epoch_actual
+            info_dict["total_steps_actual"] = self.steps_per_epoch_actual * info_dict.get("max_epoch", 0)
+            info_dict["epoch_start_step"] = self.epoch_start_step
+        eval_per_epoch = info_dict.get('eval_per_epoch', 1)
+        eval_due_epoch = eval_per_epoch > 0 and (self.epoch + 1) % eval_per_epoch == 0
+        if eval_due_epoch:
+            self.cv(model, cv_data_loader, writer, info_dict, on_batch_end=True)
+
+    def on_step_end(self, model, info_dict):
+        """Hook called after each training step. Override in subclass for custom behavior."""
+        pass
+
+    @torch.inference_mode()
+    def save_step_checkpoint(self, model, info_dict):
+        model_name = 'epoch_{}_step_{}'.format(self.epoch, self.step + 1)
+        save_model(model, model_name, info_dict)
 
     @torch.inference_mode()
     def cv(self, model, cv_data_loader, writer, info_dict, on_batch_end=True):

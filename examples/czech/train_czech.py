@@ -8,8 +8,12 @@ Features:
 - Best model tracking by eval loss
 - Full resume capability
 
-Micromamba env: cosyvoice
-Environment location: $MAMBA_ROOT_PREFIX/envs/cosyvoice
+Micromamba env: cosyvoice_training
+Environment location: $MAMBA_ROOT_PREFIX/envs/cosyvoice_training
+
+TTS Evaluation Sentence Files:
+- Czech: examples/czech/local/eval_sentences.json
+- German: examples/czech/local/eval_sentences_german.json
 
 Usage:
     torchrun --nproc_per_node=1 train_czech.py \\
@@ -24,6 +28,9 @@ import datetime
 import logging
 import os
 import sys
+import functools
+import json
+import math
 import random
 import glob
 import shutil
@@ -63,8 +70,6 @@ logging.getLogger('matplotlib').setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
 
-EVAL_SENTENCES = get_eval_sentences()
-
 
 def get_args():
     """Parse command line arguments."""
@@ -87,17 +92,69 @@ def get_args():
     parser.add_argument('--pin_memory', action='store_true', default=True)
     parser.add_argument('--use_amp', action='store_true', default=False)
     parser.add_argument('--save_per_step', default=500, type=int, help='Save every N steps')
-    parser.add_argument('--eval_per_step', default=5000, type=int, help='Eval every N steps')
-    parser.add_argument('--max_checkpoints', default=3, type=int, help='Max rolling checkpoints')
+    parser.add_argument('--eval_per_step', default=5000, type=int, help='Eval every N steps (0 to disable step eval)')
+    parser.add_argument('--eval_per_epoch', default=1, type=int,
+                        help='Eval every N epochs (0 to disable epoch eval)')
+    parser.add_argument('--max_checkpoints', default=3, type=int, help='Max rolling checkpoints (total)')
     parser.add_argument('--resume', default=None, help='Resume from checkpoint dir')
     parser.add_argument('--timeout', default=60, type=int, help='Timeout for joins')
     parser.add_argument('--tts_eval_per_step', default=500, type=int,
-                        help='Generate TTS samples every N steps (0 to disable)')
+                        help='Generate TTS samples every N steps (0 to disable step TTS)')
+    parser.add_argument('--tts_eval_per_epoch', nargs='?', const=1, default=0, type=int,
+                        help='Generate TTS samples every N epochs (0 to disable; flag means every epoch)')
+    parser.add_argument('--llm_eval_checkpoint', default=None,
+                        help='LLM checkpoint path for TTS eval during flow training')
+    parser.add_argument('--flow_eval_checkpoint', '--flow-eval-checkpoint', default=None,
+                        help='Flow checkpoint path for TTS eval during LLM training')
+    parser.add_argument('--flow_mel_l1_utts', default=1, type=int,
+                        help='Number of CV utterances to compute flow mel L1 (0 to disable)')
+    parser.add_argument('--max-frames-in-batch', dest='max_frames_in_batch', default=None, type=int,
+                        help='Override dynamic batch max_frames_in_batch in config')
+    parser.add_argument('--lr', dest='lr', default=None, type=float,
+                        help='Override optimizer lr (train_conf.optim_conf.lr)')
+    parser.add_argument('--max-epoch', dest='max_epoch', default=None, type=int,
+                        help='Override max_epoch from config (applies to both LLM and Flow)')
+    parser.add_argument('--max-steps', dest='max_steps', default=0, type=int,
+                        help='Stop training after this many global steps (0 to disable)')
+    parser.add_argument('--accum-grad', dest='accum_grad', default=None, type=int,
+                        help='Override train_conf.accum_grad (default: config)')
+    parser.add_argument('--reset_checkpoint_state', action='store_true',
+                        help='Ignore step/epoch/best_loss from --checkpoint (use weights only)')
     return parser.parse_args()
 
 
-def estimate_total_steps(data_list_path: str, accum_grad: int, max_epoch: int) -> int:
-    """Estimate total training steps based on dataset size.
+def _filter_state_dict_tensors(state_dict):
+    """Remove non-tensor items from checkpoint state_dict."""
+    return {k: v for k, v in state_dict.items() if torch.is_tensor(v)}
+
+
+def _resolve_llm_eval_checkpoint(args) -> str:
+    """Resolve LLM checkpoint for flow-phase TTS eval."""
+    if args.llm_eval_checkpoint and os.path.exists(args.llm_eval_checkpoint):
+        return args.llm_eval_checkpoint
+    if args.model != 'flow':
+        return ''
+
+    llm_dir = Path(args.model_dir).parent / 'llm'
+    candidates = [
+        llm_dir / 'best_model.pt',
+        llm_dir / 'epoch_1_whole.pt',
+        llm_dir / 'epoch_0_whole.pt',
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+
+    # Fall back to the latest step checkpoint if present.
+    step_ckpts = sorted(llm_dir.glob('epoch_*_step_*.pt'))
+    if step_ckpts:
+        return str(step_ckpts[-1])
+
+    return ''
+
+
+def estimate_total_steps_from_tarlist(data_list_path: str, accum_grad: int, max_epoch: int) -> tuple[int, int]:
+    """Estimate total training steps from tar list count (heuristic).
 
     Args:
         data_list_path: Path to data.list file
@@ -114,10 +171,175 @@ def estimate_total_steps(data_list_path: str, accum_grad: int, max_epoch: int) -
         samples_per_tar = 1000
         batches_per_1000_samples = 142  # empirical from previous runs
         batches_per_epoch = tar_count * batches_per_1000_samples
-        steps_per_epoch = batches_per_epoch // accum_grad
-        return steps_per_epoch * max_epoch
+        steps_per_epoch = math.ceil(batches_per_epoch / accum_grad)
+        return steps_per_epoch, steps_per_epoch * max_epoch
     except Exception:
-        return 0  # Return 0 if estimation fails
+        return 0, 0  # Return 0s if estimation fails
+
+
+def estimate_steps_from_duration(train_data_list: str,
+                                 dataset_csv: str,
+                                 max_frames_in_batch: int,
+                                 accum_grad: int,
+                                 max_epoch: int,
+                                 sample_rate: int,
+                                 hop_size: int,
+                                 shuffle_size: int = 1000,
+                                 sort_size: int = 500,
+                                 seed: int = 0,
+                                 cache_path: str | None = None) -> tuple[int, int, dict]:
+    """Estimate steps from total audio duration in the train split.
+
+    This reads the train parquet list, maps wav paths to durations from the dataset CSV,
+    and computes steps per epoch based on total frames.
+    """
+    if not os.path.isfile(train_data_list) or not os.path.isfile(dataset_csv):
+        return 0, 0, {}
+
+    cache = {}
+    if cache_path and os.path.exists(cache_path):
+        try:
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                cache = json.load(f)
+            if cache.get('train_data_list') == train_data_list and \
+               cache.get('dataset_csv') == dataset_csv and \
+               cache.get('max_frames_in_batch') == max_frames_in_batch and \
+               cache.get('accum_grad') == accum_grad and \
+               cache.get('max_epoch') == max_epoch and \
+               cache.get('sample_rate') == sample_rate and \
+               cache.get('hop_size') == hop_size and \
+               cache.get('shuffle_size') == shuffle_size and \
+               cache.get('sort_size') == sort_size and \
+               cache.get('seed') == seed and \
+               cache.get('train_data_mtime') == os.path.getmtime(train_data_list) and \
+               cache.get('dataset_csv_mtime') == os.path.getmtime(dataset_csv):
+                return cache.get('steps_per_epoch', 0), cache.get('total_steps', 0), cache
+        except Exception:
+            cache = {}
+
+    try:
+        import csv
+        import pyarrow.parquet as pq
+    except Exception:
+        return 0, 0, {}
+
+    dur_map = {}
+    with open(dataset_csv, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f, delimiter='|')
+        for row in reader:
+            try:
+                dur_map[row['audio_file']] = float(row['duration'])
+            except Exception:
+                continue
+
+    total_seconds = 0.0
+    missing = 0
+    rows = 0
+    lengths = []
+    with open(train_data_list, 'r', encoding='utf-8') as f:
+        parquet_paths = [line.strip() for line in f if line.strip()]
+
+    for path in parquet_paths:
+        pf = pq.ParquetFile(path)
+        for rg in range(pf.metadata.num_row_groups):
+            wavs = pf.read_row_group(rg, columns=['wav']).to_pydict().get('wav', [])
+            for wav in wavs:
+                rows += 1
+                dur = dur_map.get(wav)
+                if dur is None:
+                    missing += 1
+                    continue
+                total_seconds += dur
+                if hop_size:
+                    frames = max(1, int(round(dur * sample_rate / hop_size)))
+                    lengths.append(frames)
+
+    frames_per_sec = sample_rate / hop_size if hop_size else 0
+    total_frames = total_seconds * frames_per_sec
+    if max_frames_in_batch and lengths:
+        rng = random.Random(seed)
+        # Shuffle buffer
+        shuffled = []
+        buf = []
+        for length in lengths:
+            buf.append(length)
+            if len(buf) >= shuffle_size:
+                rng.shuffle(buf)
+                shuffled.extend(buf)
+                buf = []
+        if buf:
+            rng.shuffle(buf)
+            shuffled.extend(buf)
+
+        # Sort buffer by length
+        sorted_lengths = []
+        buf = []
+        for length in shuffled:
+            buf.append(length)
+            if len(buf) >= sort_size:
+                buf.sort()
+                sorted_lengths.extend(buf)
+                buf = []
+        if buf:
+            buf.sort()
+            sorted_lengths.extend(buf)
+
+        # Dynamic batch simulation
+        batches_per_epoch = 0
+        buf = []
+        longest = 0
+        for length in sorted_lengths:
+            new_longest = length if length > longest else longest
+            frames_after = new_longest * (len(buf) + 1)
+            if frames_after > max_frames_in_batch:
+                if buf:
+                    batches_per_epoch += 1
+                buf = [length]
+                longest = length
+            else:
+                buf.append(length)
+                longest = new_longest
+        if buf:
+            batches_per_epoch += 1
+    else:
+        batches_per_epoch = math.ceil(total_frames / max_frames_in_batch) if max_frames_in_batch else 0
+    steps_per_epoch = math.ceil(batches_per_epoch / accum_grad) if accum_grad else 0
+    total_steps = steps_per_epoch * max_epoch
+
+    cache = {
+        'train_data_list': train_data_list,
+        'dataset_csv': dataset_csv,
+        'train_data_mtime': os.path.getmtime(train_data_list),
+        'dataset_csv_mtime': os.path.getmtime(dataset_csv),
+        'max_frames_in_batch': max_frames_in_batch,
+        'accum_grad': accum_grad,
+        'max_epoch': max_epoch,
+        'sample_rate': sample_rate,
+        'hop_size': hop_size,
+        'rows': rows,
+        'missing': missing,
+        'total_seconds': total_seconds,
+        'total_hours': total_seconds / 3600.0,
+        'frames_per_sec': frames_per_sec,
+        'total_frames': int(total_frames),
+        'batches_per_epoch': batches_per_epoch,
+        'shuffle_size': shuffle_size,
+        'sort_size': sort_size,
+        'seed': seed,
+        'steps_per_epoch': steps_per_epoch,
+        'total_steps': total_steps,
+    }
+    if cache_path:
+        try:
+            with open(cache_path, 'w', encoding='utf-8') as f:
+                json.dump(cache, f, indent=2)
+        except Exception:
+            pass
+
+    return steps_per_epoch, total_steps, cache
+
+
+DEFAULT_INSTRUCT = "You are a helpful assistant.<|endofprompt|>"
 
 
 def load_dataset_speakers(csv_path: str, delimiter: str = '|') -> list:
@@ -159,32 +381,78 @@ def get_random_speaker_ref(speakers: list, rng: random.Random) -> tuple:
     return rng.choice(speakers)
 
 
+def format_prompt_text(text: str) -> str:
+    prompt_text = (text or '').strip()
+    if not prompt_text:
+        return '<|endofprompt|>'
+    if '<|endofprompt|>' not in prompt_text:
+        prompt_text = f'{prompt_text} <|endofprompt|>'
+    return prompt_text
+
+
+def find_latest_step_checkpoint(resume_path: str) -> str | None:
+    if os.path.isfile(resume_path):
+        return resume_path
+
+    candidates = []
+    patterns = [
+        os.path.join(resume_path, 'epoch_*_step_*.pt'),
+        os.path.join(resume_path, 'checkpoints', 'epoch_*_step_*.pt'),
+        os.path.join(resume_path, 'step_*.pt'),
+    ]
+    for pattern in patterns:
+        candidates.extend(glob.glob(pattern))
+
+    if not candidates:
+        return None
+
+    def get_step(path: str) -> int:
+        parts = Path(path).stem.split('_')
+        for part in reversed(parts):
+            if part.isdigit():
+                return int(part)
+        return -1
+
+    return max(candidates, key=get_step)
+
+
 def manage_rolling_checkpoints(checkpoint_dir: str, max_keep: int = 3):
-    """Manage rolling checkpoints, keeping only the most recent step checkpoints.
+    """Manage rolling checkpoints, keeping only the most recent checkpoints in total.
 
     Args:
         checkpoint_dir: Directory containing checkpoints
-        max_keep: Maximum step checkpoints to keep (excludes best_model, epoch_*_whole)
+        max_keep: Maximum checkpoints to keep (includes epoch, step, and best_model)
     """
-    # Find step checkpoints matching pattern: epoch_N_step_M.pt
-    pattern = os.path.join(checkpoint_dir, 'epoch_*_step_*.pt')
-    checkpoints = glob.glob(pattern)
+    patterns = [
+        os.path.join(checkpoint_dir, '*.pt'),
+        os.path.join(checkpoint_dir, 'checkpoints', '*.pt'),
+    ]
+    checkpoints = []
+    for pattern in patterns:
+        checkpoints.extend(glob.glob(pattern))
 
-    # Sort by step number (extract step from filename)
-    def get_step(path):
-        name = Path(path).stem  # epoch_0_step_500
-        parts = name.split('_')
-        return int(parts[-1]) if parts[-1].isdigit() else 0
+    protected = set()
+    best_model = Path(checkpoint_dir) / 'best_model.pt'
+    if best_model.exists():
+        protected.add(str(best_model))
 
-    checkpoints = sorted(checkpoints, key=get_step)
+    checkpoints = [
+        ckpt for ckpt in checkpoints
+        if Path(ckpt).name not in ('init.pt',) and ckpt not in protected
+    ]
 
-    # Remove old checkpoints
-    while len(checkpoints) > max_keep:
-        old_ckpt = checkpoints.pop(0)
+    checkpoints = sorted(checkpoints, key=os.path.getmtime)
+
+    keep_count = max(max_keep - len(protected), 0)
+    keep = set(checkpoints[-keep_count:]) if keep_count > 0 else set()
+    keep |= protected
+
+    for old_ckpt in list(checkpoints):
+        if old_ckpt in keep:
+            continue
         logger.info(f"Removing old checkpoint: {old_ckpt}")
         try:
             os.remove(old_ckpt)
-            # Also remove yaml file if exists
             yaml_file = old_ckpt.replace('.pt', '.yaml')
             if os.path.exists(yaml_file):
                 os.remove(yaml_file)
@@ -281,6 +549,25 @@ class CzechExecutor(Executor):
             torch.save(state_dict, save_path)
             logger.info(f"New best model saved! Loss: {cv_loss:.6f} at step {self.step}")
 
+    @torch.inference_mode()
+    def save_step_checkpoint(self, model, info_dict):
+        super().save_step_checkpoint(model, info_dict)
+        if self.rank == 0:
+            max_keep = getattr(self.args, 'max_checkpoints', 3)
+            manage_rolling_checkpoints(self.args.model_dir, max_keep)
+
+    def on_step_end(self, model, info_dict):
+        """Check and run TTS evaluation at configured intervals.
+
+        This hook is called after each training step, independent of cv().
+        """
+        if self.rank != 0 or self.cosyvoice_model is None:
+            return
+
+        tts_interval = getattr(self.args, 'tts_eval_per_step', 0)
+        if tts_interval > 0 and self.step > 0 and (self.step + 1) % tts_interval == 0:
+            self.run_evaluation_tts(model, self.step)
+
     def run_evaluation_tts(self, model, step: int):
         """Run TTS generation during evaluation.
 
@@ -305,23 +592,27 @@ class CzechExecutor(Executor):
 
         rng = random.Random(step)  # Different random refs each eval
 
-        logger.info(f"Generating {len(EVAL_SENTENCES)} TTS samples at step {step}...")
+        sentences = get_eval_sentences()
+        logger.info(f"Generating {len(sentences)} TTS samples at step {step}...")
 
-        for idx, sentence in enumerate(EVAL_SENTENCES):
+        for idx, sentence in enumerate(sentences):
             try:
                 # Get random speaker reference
                 ref_audio, ref_speaker = get_random_speaker_ref(self.speakers, rng)
                 ref_speaker_safe = ref_speaker.replace(' ', '_').replace('/', '_')[:30]
                 ref_basename = Path(ref_audio).stem[:20]
+                prompt_text = format_prompt_text(DEFAULT_INSTRUCT)
 
-                # Use the inference method
-                for result in self.cosyvoice_model.inference_zero_shot(
+                # Use instruct2 to avoid passing prompt speech tokens into the LLM,
+                # which is out-of-distribution for SFT-style fine-tuning.
+                for result in self.cosyvoice_model.inference_instruct2(
                     tts_text=sentence,
-                    prompt_text="",  # No prompt text needed
+                    instruct_text=prompt_text,
                     prompt_wav=ref_audio,
                     stream=False,
                     speed=1.0,
-                    text_frontend=True
+                    # Keep the sentence intact (no Czech comma-based splitting).
+                    text_frontend=False
                 ):
                     tts_speech = result['tts_speech']
                     break  # Just get first result
@@ -343,6 +634,78 @@ class CzechExecutor(Executor):
         logger.info(f"TTS samples saved to {output_dir}")
 
     @torch.inference_mode()
+    def compute_flow_mel_l1(self, model, cv_data_loader):
+        """Compute mean L1 mel error for flow on a small CV subset."""
+        if self.model_type != 'flow' or self.rank != 0:
+            return None
+        max_utts = max(0, getattr(self.args, 'flow_mel_l1_utts', 0))
+        if max_utts == 0:
+            return None
+
+        flow_model = model.module if hasattr(model, 'module') else model
+        flow_model.eval()
+
+        try:
+            device = next(flow_model.parameters()).device
+        except StopIteration:
+            device = torch.device('cpu')
+
+        total_l1 = 0.0
+        processed = 0
+
+        for batch in cv_data_loader:
+            if processed >= max_utts:
+                break
+            if 'speech_token' not in batch or 'speech_feat' not in batch:
+                logger.warning("CV batch missing speech_token/speech_feat; skipping L1 mel metric")
+                break
+
+            token = batch['speech_token'][:1].to(device)
+            token_len = batch['speech_token_len'][:1].to(device)
+            feat = batch['speech_feat'][:1].to(device)
+            feat_len = batch['speech_feat_len'][:1].to(device)
+            embedding = batch['embedding'][:1].to(device)
+
+            tlen = int(token_len[0].item())
+            flen = int(feat_len[0].item())
+            if tlen <= 0 or flen <= 0:
+                continue
+
+            token = token[:, :tlen]
+            feat = feat[:, :flen, :]
+            token_len = torch.tensor([tlen], dtype=torch.int32, device=device)
+            feat_len = torch.tensor([flen], dtype=torch.int32, device=device)
+
+            prompt_token = token.new_zeros((1, 0))
+            prompt_token_len = token_len.new_zeros((1,))
+            prompt_feat = feat.new_zeros((1, 0, feat.shape[2]))
+            prompt_feat_len = feat_len.new_zeros((1,))
+
+            pred_feat, _ = flow_model.inference(
+                token=token,
+                token_len=token_len,
+                prompt_token=prompt_token,
+                prompt_token_len=prompt_token_len,
+                prompt_feat=prompt_feat,
+                prompt_feat_len=prompt_feat_len,
+                embedding=embedding,
+                streaming=False,
+                finalize=True
+            )
+            pred_feat = pred_feat.transpose(1, 2)  # [B, T, 80]
+
+            min_len = min(pred_feat.shape[1], feat.shape[1])
+            if min_len <= 0:
+                continue
+            l1 = torch.mean(torch.abs(pred_feat[:, :min_len, :] - feat[:, :min_len, :]))
+            total_l1 += l1.item()
+            processed += 1
+
+        if processed == 0:
+            return None
+        return total_l1 / processed
+
+    @torch.inference_mode()
     def cv(self, model, cv_data_loader, writer, info_dict, on_batch_end=True):
         """Override cv() to add TTS generation, best model saving, and checkpoint cleanup.
 
@@ -360,23 +723,35 @@ class CzechExecutor(Executor):
         if self.rank == 0:
             self.save_best_model(model, cv_loss)
 
-            # Clean up old step checkpoints (keep only max_checkpoints)
+            # Clean up old checkpoints (keep only max_checkpoints total)
             max_keep = getattr(self.args, 'max_checkpoints', 3)
             checkpoint_dir = self.args.model_dir
             manage_rolling_checkpoints(checkpoint_dir, max_keep)
 
-        # Run TTS generation if at correct interval
-        # Note: self.step is 0-indexed, so step 499 corresponds to checkpoint 500
-        tts_interval = getattr(self.args, 'tts_eval_per_step', 500)
-        if tts_interval > 0 and self.step > 0 and (self.step + 1) % tts_interval == 0:
-            if self.rank == 0:
-                self.run_evaluation_tts(model, self.step)
+        # Optional flow mel L1 metric
+        if self.model_type == 'flow' and self.rank == 0:
+            flow_l1 = self.compute_flow_mel_l1(model, cv_data_loader)
+            if flow_l1 is not None:
+                if writer is not None:
+                    writer.add_scalar('CV/flow_mel_l1', flow_l1, self.step + 1)
+                logger.info(f"Flow mel L1 (avg over {getattr(self.args, 'flow_mel_l1_utts', 0)} utts): {flow_l1:.6f}")
+
+        # Run TTS generation at epoch end if configured.
+        # Note: Step-based TTS is handled by on_step_end() hook, not here.
+        tts_epoch_interval = int(getattr(self.args, 'tts_eval_per_epoch', 0) or 0)
+        run_tts_epoch = tts_epoch_interval > 0 and on_batch_end and \
+            ((self.epoch + 1) % tts_epoch_interval == 0)
+        if run_tts_epoch and self.rank == 0:
+            self.run_evaluation_tts(model, self.step)
 
 
 @record
 def main():
     """Main training function."""
     args = get_args()
+    mamba_env = os.environ.get('COSYVOICE_MAMBA_ENV')
+    if mamba_env:
+        logger.info(f"Micromamba env: {mamba_env}")
 
     # Set up tensorboard dir
     if args.tensorboard_dir is None:
@@ -396,9 +771,38 @@ def main():
             'qwen_pretrain_path': args.qwen_pretrain_path
         })
 
+    if args.max_frames_in_batch is not None and args.max_frames_in_batch > 0:
+        batch_cfg = configs.get('batch')
+        if isinstance(batch_cfg, functools.partial):
+            if batch_cfg.keywords is None:
+                batch_cfg.keywords = {}
+            batch_cfg.keywords['max_frames_in_batch'] = args.max_frames_in_batch
+        elif isinstance(batch_cfg, dict):
+            batch_cfg['max_frames_in_batch'] = args.max_frames_in_batch
+
+    if args.max_epoch is not None and args.max_epoch > 0:
+        configs['train_conf']['max_epoch'] = args.max_epoch
+
+    if args.lr is not None and args.lr > 0:
+        optim_conf = configs['train_conf'].get('optim_conf', {})
+        if isinstance(optim_conf, functools.partial):
+            if optim_conf.keywords is None:
+                optim_conf.keywords = {}
+            optim_conf.keywords['lr'] = args.lr
+        elif isinstance(optim_conf, dict):
+            optim_conf['lr'] = args.lr
+        else:
+            configs['train_conf']['optim_conf'] = {'lr': args.lr}
+
+    if args.accum_grad is not None and args.accum_grad > 0:
+        configs['train_conf']['accum_grad'] = args.accum_grad
+
     # Override save_per_step from args
     configs['train_conf']['save_per_step'] = args.save_per_step
-    configs['train_conf'].update(vars(args))
+    args_dict = vars(args).copy()
+    if args.accum_grad is None:
+        args_dict.pop('accum_grad', None)
+    configs['train_conf'].update(args_dict)
 
     # Init distributed
     init_distributed(args)
@@ -426,20 +830,21 @@ def main():
     if args.checkpoint is not None and os.path.exists(args.checkpoint):
         state_dict = torch.load(args.checkpoint, map_location='cpu')
         model.load_state_dict(state_dict, strict=False)
-        if 'step' in state_dict:
-            start_step = state_dict['step']
-        if 'epoch' in state_dict:
-            start_epoch = state_dict['epoch']
-        if 'best_loss' in state_dict:
-            best_loss = state_dict['best_loss']
-        logger.info(f"Loaded checkpoint from {args.checkpoint}, step={start_step}, epoch={start_epoch}")
+        if args.reset_checkpoint_state:
+            logger.info(f"Loaded checkpoint weights from {args.checkpoint} (reset step/epoch/best_loss)")
+        else:
+            if 'step' in state_dict:
+                start_step = state_dict['step']
+            if 'epoch' in state_dict:
+                start_epoch = state_dict['epoch']
+            if 'best_loss' in state_dict:
+                best_loss = state_dict['best_loss']
+            logger.info(f"Loaded checkpoint from {args.checkpoint}, step={start_step}, epoch={start_epoch}")
 
     # Resume from directory if specified
     if args.resume and os.path.exists(args.resume):
-        # Find latest checkpoint
-        checkpoints = glob.glob(os.path.join(args.resume, 'step_*.pt'))
-        if checkpoints:
-            latest = max(checkpoints, key=lambda x: int(Path(x).stem.split('_')[-1]))
+        latest = find_latest_step_checkpoint(args.resume)
+        if latest:
             state_dict = torch.load(latest, map_location='cpu')
             model.load_state_dict(state_dict, strict=False)
             start_step = state_dict.get('step', 0)
@@ -461,9 +866,53 @@ def main():
     info_dict = deepcopy(configs['train_conf'])
     info_dict['step'] = start_step
     info_dict['epoch'] = start_epoch
-    info_dict['total_steps'] = estimate_total_steps(
-        args.train_data, configs['train_conf']['accum_grad'], configs['train_conf']['max_epoch']
+    def _cfg_kwargs(cfg_val):
+        if isinstance(cfg_val, dict):
+            return cfg_val
+        if isinstance(cfg_val, functools.partial):
+            return cfg_val.keywords or {}
+        return {}
+
+    batch_kw = _cfg_kwargs(configs.get('batch'))
+    max_frames = batch_kw.get('max_frames_in_batch', 0)
+
+    feat_kw = _cfg_kwargs(configs.get('feat_extractor'))
+    hop_size = feat_kw.get('hop_size', 0)
+
+    shuffle_kw = _cfg_kwargs(configs.get('shuffle'))
+    shuffle_size = shuffle_kw.get('shuffle_size', 1000)
+
+    sort_kw = _cfg_kwargs(configs.get('sort'))
+    sort_size = sort_kw.get('sort_size', 500)
+    cache_path = os.path.join(args.model_dir, 'steps_estimate.json')
+    steps_per_epoch_est, total_steps_est, est_meta = estimate_steps_from_duration(
+        args.train_data,
+        args.dataset_csv,
+        max_frames,
+        configs['train_conf']['accum_grad'],
+        configs['train_conf']['max_epoch'],
+        configs.get('sample_rate', 0),
+        hop_size,
+        shuffle_size=shuffle_size,
+        sort_size=sort_size,
+        cache_path=cache_path,
     )
+    if total_steps_est == 0:
+        steps_per_epoch_est, total_steps_est = estimate_total_steps_from_tarlist(
+            args.train_data, configs['train_conf']['accum_grad'], configs['train_conf']['max_epoch']
+        )
+        est_meta = {}
+        est_source = 'tarlist'
+    else:
+        est_source = 'duration'
+
+    info_dict['steps_per_epoch_est'] = steps_per_epoch_est
+    info_dict['total_steps'] = total_steps_est
+    info_dict['total_steps_est'] = total_steps_est
+    info_dict['steps_estimate_source'] = est_source
+    if est_meta:
+        info_dict['steps_estimate_rows'] = est_meta.get('rows', 0)
+        info_dict['steps_estimate_missing'] = est_meta.get('missing', 0)
     save_model(model, 'init', info_dict)
 
     # Create executor
@@ -474,22 +923,71 @@ def main():
 
     # Load CosyVoice3 model for TTS evaluation (only on rank 0)
     # CosyVoice3 expects the model dir with cosyvoice3.yaml, which is parent of qwen_pretrain_path
-    if rank == 0 and args.tts_eval_per_step > 0:
+    if rank == 0 and (args.tts_eval_per_step > 0 or args.tts_eval_per_epoch > 0):
         cosyvoice_model_dir = str(Path(args.qwen_pretrain_path).parent)
         logger.info(f"Loading CosyVoice3 model from {cosyvoice_model_dir} for TTS evaluation...")
         try:
             cosyvoice_model = CosyVoice3(cosyvoice_model_dir)
             executor.cosyvoice_model = cosyvoice_model
+            if args.model == 'flow':
+                llm_eval_ckpt = _resolve_llm_eval_checkpoint(args)
+                if llm_eval_ckpt:
+                    logger.info(f"Loading LLM eval checkpoint for flow TTS: {llm_eval_ckpt}")
+                    state_dict = torch.load(llm_eval_ckpt, map_location='cpu')
+                    state_dict = _filter_state_dict_tensors(state_dict)
+                    missing, unexpected = executor.cosyvoice_model.model.llm.load_state_dict(
+                        state_dict, strict=False
+                    )
+                    if missing:
+                        logger.info(f"LLM eval checkpoint missing keys: {len(missing)}")
+                    if unexpected:
+                        logger.info(f"LLM eval checkpoint unexpected keys: {len(unexpected)}")
+                else:
+                    logger.warning("No LLM eval checkpoint found for flow TTS; using base LLM.")
+            if args.model == 'llm' and args.flow_eval_checkpoint:
+                if os.path.exists(args.flow_eval_checkpoint):
+                    logger.info(f"Loading Flow eval checkpoint for LLM TTS: {args.flow_eval_checkpoint}")
+                    state_dict = torch.load(args.flow_eval_checkpoint, map_location='cpu')
+                    state_dict = _filter_state_dict_tensors(state_dict)
+                    missing, unexpected = executor.cosyvoice_model.model.flow.load_state_dict(
+                        state_dict, strict=False
+                    )
+                    if missing:
+                        logger.info(f"Flow eval checkpoint missing keys: {len(missing)}")
+                    if unexpected:
+                        logger.info(f"Flow eval checkpoint unexpected keys: {len(unexpected)}")
+                else:
+                    logger.warning(f"Flow eval checkpoint not found: {args.flow_eval_checkpoint}")
             logger.info("CosyVoice3 model loaded successfully for TTS evaluation")
         except Exception as e:
             logger.warning(f"Failed to load CosyVoice3 for TTS eval: {e}")
             logger.warning("TTS evaluation will be disabled")
 
     logger.info(f'Starting training from step {start_step}, epoch {start_epoch + 1}')
-    logger.info(f'Estimated total steps: {info_dict["total_steps"]}')
+    if est_meta:
+        logger.info(
+            "Estimated steps/epoch from duration: %s (total_steps %s, hours %.2f, missing %s, rows %s)",
+            info_dict["steps_per_epoch_est"],
+            info_dict["total_steps"],
+            est_meta.get('total_hours', 0.0),
+            est_meta.get('missing', 0),
+            est_meta.get('rows', 0),
+        )
+    else:
+        logger.info(
+            "Estimated steps/epoch from tarlist heuristic: %s (total_steps %s)",
+            info_dict["steps_per_epoch_est"],
+            info_dict["total_steps"],
+        )
     logger.info(f'Save every {args.save_per_step} steps, eval every {args.eval_per_step} steps')
+    logger.info(f'Eval every {args.eval_per_epoch} epochs')
     logger.info(f'TTS eval every {args.tts_eval_per_step} steps')
-    logger.info(f'Max rolling checkpoints: {args.max_checkpoints}')
+    logger.info(f'TTS eval every {args.tts_eval_per_epoch} epochs')
+    logger.info(f'Max rolling checkpoints (total): {args.max_checkpoints}')
+    if args.max_steps and args.max_steps > 0:
+        logger.info(f"Max steps enabled: {args.max_steps}")
+    if args.accum_grad is not None and args.accum_grad > 0:
+        logger.info(f"Accum grad override: {args.accum_grad}")
 
     # Initial evaluation at step 0
     if start_step == 0:
@@ -497,7 +995,8 @@ def main():
         dist.barrier()
         executor.cv(model, cv_data_loader, writer, info_dict, on_batch_end=False)
         # Run initial TTS if enabled
-        if rank == 0 and executor.cosyvoice_model is not None:
+        if rank == 0 and executor.cosyvoice_model is not None and \
+                (args.tts_eval_per_step > 0 or args.tts_eval_per_epoch > 0):
             executor.run_evaluation_tts(model, 0)
 
     # Training loop
@@ -522,6 +1021,10 @@ def main():
             ckpt_dir = os.path.join(args.model_dir, 'checkpoints')
             save_checkpoint(model, executor.step, epoch, ckpt_dir,
                           prefix=f"epoch_{epoch}", best_loss=executor.best_loss)
+            manage_rolling_checkpoints(args.model_dir, args.max_checkpoints)
+        if getattr(executor, 'stop_training', False):
+            logger.info("Stopping training early due to max_steps.")
+            break
 
     logger.info("Training complete!")
 
