@@ -565,7 +565,7 @@ class CzechExecutor(Executor):
             return
 
         tts_interval = getattr(self.args, 'tts_eval_per_step', 0)
-        if tts_interval > 0 and self.step > 0 and (self.step + 1) % tts_interval == 0:
+        if tts_interval > 0 and self.step > 0 and self.step % tts_interval == 0:
             self.run_evaluation_tts(model, self.step)
 
     def run_evaluation_tts(self, model, step: int):
